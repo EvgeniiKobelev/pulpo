@@ -1,9 +1,9 @@
-# crypto-gateway workspace architecture
+# pulpo_loco workspace architecture
 
 ## Структура
 
 ```
-crypto-gateway/
+pulpo_loco/
 ├── Cargo.toml                    # workspace root
 ├── crates/
 │   ├── gateway-core/             # типы, трейты, ошибки — 0 зависимостей от бирж
@@ -977,10 +977,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-gateway-core = { path = "../crypto-gateway/crates/gateway-core" }
-gateway-binance = { path = "../crypto-gateway/crates/gateway-binance" }
-gateway-bybit = { path = "../crypto-gateway/crates/gateway-bybit" }
-gateway-manager = { path = "../crypto-gateway/crates/gateway-manager", features = ["all"] }
+gateway-core = { path = "../pulpo_loco/crates/gateway-core" }
+gateway-binance = { path = "../pulpo_loco/crates/gateway-binance" }
+gateway-bybit = { path = "../pulpo_loco/crates/gateway-bybit" }
+gateway-manager = { path = "../pulpo_loco/crates/gateway-manager", features = ["all"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 futures = "0.3"
