@@ -7,7 +7,7 @@ edition = "2021"
 gateway-core = { path = "../gateway-core" }
 async-trait = "0.1"
 futures = "0.3"
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "rt"] }
 
 gateway-binance = { path = "../gateway-binance", optional = true }
 gateway-bybit = { path = "../gateway-bybit", optional = true }
