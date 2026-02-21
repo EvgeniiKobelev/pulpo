@@ -55,16 +55,23 @@ impl Exchange for Binance {
         self.rest.all_tickers().await
     }
 
-    // WS stubs -- will be implemented in Task 6
-    async fn stream_orderbook(&self, _symbol: &Symbol) -> Result<BoxStream<OrderBook>> {
-        todo!("WS not yet implemented")
+    async fn stream_orderbook(&self, symbol: &Symbol) -> Result<BoxStream<OrderBook>> {
+        ws::stream_orderbook(&self.config, symbol).await
     }
 
-    async fn stream_trades(&self, _symbol: &Symbol) -> Result<BoxStream<Trade>> {
-        todo!("WS not yet implemented")
+    async fn stream_trades(&self, symbol: &Symbol) -> Result<BoxStream<Trade>> {
+        ws::stream_trades(&self.config, symbol).await
     }
 
-    async fn stream_candles(&self, _symbol: &Symbol, _interval: Interval) -> Result<BoxStream<Candle>> {
-        todo!("WS not yet implemented")
+    async fn stream_candles(&self, symbol: &Symbol, interval: Interval) -> Result<BoxStream<Candle>> {
+        ws::stream_candles(&self.config, symbol, interval).await
+    }
+
+    async fn stream_orderbooks_batch(&self, symbols: &[Symbol]) -> Result<BoxStream<OrderBook>> {
+        ws::stream_orderbooks_combined(&self.config, symbols).await
+    }
+
+    async fn stream_trades_batch(&self, symbols: &[Symbol]) -> Result<BoxStream<Trade>> {
+        ws::stream_trades_combined(&self.config, symbols).await
     }
 }
