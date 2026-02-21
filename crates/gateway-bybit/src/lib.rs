@@ -55,16 +55,24 @@ impl Exchange for Bybit {
         self.rest.all_tickers().await
     }
 
-    // WS stubs — to be implemented in Task 9
-    async fn stream_orderbook(&self, _symbol: &Symbol) -> Result<BoxStream<OrderBook>> {
-        todo!()
+    async fn stream_orderbook(&self, symbol: &Symbol) -> Result<BoxStream<OrderBook>> {
+        ws::stream_orderbook(&self.config, symbol).await
     }
 
-    async fn stream_trades(&self, _symbol: &Symbol) -> Result<BoxStream<Trade>> {
-        todo!()
+    async fn stream_trades(&self, symbol: &Symbol) -> Result<BoxStream<Trade>> {
+        ws::stream_trades(&self.config, symbol).await
     }
 
-    async fn stream_candles(&self, _symbol: &Symbol, _interval: Interval) -> Result<BoxStream<Candle>> {
-        todo!()
+    async fn stream_candles(&self, symbol: &Symbol, interval: Interval) -> Result<BoxStream<Candle>> {
+        ws::stream_candles(&self.config, symbol, interval).await
+    }
+
+    // Override default batch methods to use a single WS connection per call.
+    async fn stream_orderbooks_batch(&self, symbols: &[Symbol]) -> Result<BoxStream<OrderBook>> {
+        ws::stream_orderbooks_batch(&self.config, symbols).await
+    }
+
+    async fn stream_trades_batch(&self, symbols: &[Symbol]) -> Result<BoxStream<Trade>> {
+        ws::stream_trades_batch(&self.config, symbols).await
     }
 }
