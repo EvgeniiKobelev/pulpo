@@ -16,3 +16,6 @@ rust_decimal = { version = "1", features = ["serde-with-str"] }
 async-trait = "0.1"
 tracing = "0.1"
 url = "2"
+
+[dev-dependencies]
+rust_decimal_macros = "1"
