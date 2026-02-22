@@ -84,3 +84,14 @@ pub struct Order {
     pub qty: rust_decimal::Decimal,
     pub filled_qty: rust_decimal::Decimal,
 }
+
+#[async_trait]
+pub trait FuturesExchange: Exchange {
+    async fn funding_rate(&self, symbol: &Symbol) -> Result<FundingRate>;
+    async fn mark_price(&self, symbol: &Symbol) -> Result<MarkPrice>;
+    async fn open_interest(&self, symbol: &Symbol) -> Result<OpenInterest>;
+    async fn liquidations(&self, symbol: &Symbol, limit: u16) -> Result<Vec<Liquidation>>;
+
+    async fn stream_mark_price(&self, symbol: &Symbol) -> Result<BoxStream<MarkPrice>>;
+    async fn stream_liquidations(&self, symbol: &Symbol) -> Result<BoxStream<Liquidation>>;
+}

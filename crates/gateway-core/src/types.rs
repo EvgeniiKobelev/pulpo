@@ -3,11 +3,14 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum ExchangeId {
-    Binance,
-    Bitget,
-    Bybit,
+    BinanceSpot,
+    BinanceFutures,
+    BitgetSpot,
+    BitgetFutures,
+    BybitSpot,
+    BybitFutures,
     Okx,
     Gate,
     Hyperliquid,
@@ -18,9 +21,12 @@ pub enum ExchangeId {
 impl fmt::Display for ExchangeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Binance => write!(f, "binance"),
-            Self::Bitget => write!(f, "bitget"),
-            Self::Bybit => write!(f, "bybit"),
+            Self::BinanceSpot => write!(f, "binance_spot"),
+            Self::BinanceFutures => write!(f, "binance_futures"),
+            Self::BitgetSpot => write!(f, "bitget_spot"),
+            Self::BitgetFutures => write!(f, "bitget_futures"),
+            Self::BybitSpot => write!(f, "bybit_spot"),
+            Self::BybitFutures => write!(f, "bybit_futures"),
             Self::Okx => write!(f, "okx"),
             Self::Gate => write!(f, "gate"),
             Self::Hyperliquid => write!(f, "hyperliquid"),
@@ -146,6 +152,43 @@ impl Interval {
             Self::H4 => 14400, Self::D1 => 86400, Self::W1 => 604800,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FundingRate {
+    pub exchange: ExchangeId,
+    pub symbol: Symbol,
+    pub rate: Decimal,
+    pub next_funding_time_ms: u64,
+    pub timestamp_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarkPrice {
+    pub exchange: ExchangeId,
+    pub symbol: Symbol,
+    pub mark_price: Decimal,
+    pub index_price: Decimal,
+    pub timestamp_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenInterest {
+    pub exchange: ExchangeId,
+    pub symbol: Symbol,
+    pub open_interest: Decimal,
+    pub open_interest_value: Decimal,
+    pub timestamp_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Liquidation {
+    pub exchange: ExchangeId,
+    pub symbol: Symbol,
+    pub side: Side,
+    pub price: Decimal,
+    pub qty: Decimal,
+    pub timestamp_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

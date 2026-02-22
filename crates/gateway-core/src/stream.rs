@@ -8,6 +8,9 @@ pub enum StreamEvent {
     Trade(Trade),
     Candle(Candle),
     Ticker(Ticker),
+    FundingRate(FundingRate),
+    MarkPrice(MarkPrice),
+    Liquidation(Liquidation),
     Info(String),
 }
 
