@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="logo.JPG" alt="Pulpo Loco" width="200">
+<img src="logo.png" alt="Pulpo Loco" width="200">
 
 # Pulpo Loco
 
