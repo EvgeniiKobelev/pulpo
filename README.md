@@ -21,20 +21,20 @@ Write your trading logic once — run it on Binance, Bitget, Bybit, OKX, and mor
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      gateway-manager                         │
-│          GatewayManager: register / query / merge            │
-└────────┬──────────────────┬──────────────────┬──────────────┘
-         │                  │                  │
-┌────────▼────────┐ ┌──────▼────────┐ ┌───────▼─────────┐
-│ gateway-binance  │ │ gateway-bitget │ │  gateway-bybit   │
-│  REST + WS       │ │  REST + WS     │ │  REST + WS       │
-└────────┬────────┘ └──────┬────────┘ └───────┬─────────┘
-         │                  │                  │
-┌────────▼──────────────────▼──────────────────▼─────────────┐
-│                       gateway-core                          │
-│       Exchange trait, types, errors, config                  │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              gateway-manager                                 │
+│                  GatewayManager: register / query / merge                     │
+└──────┬──────────────────┬──────────────────┬──────────────────┬──────────────┘
+       │                  │                  │                  │
+┌──────▼────────┐ ┌───────▼───────┐ ┌───────▼────────┐ ┌──────▼──────┐
+│gateway-binance│ │gateway-bitget │ │ gateway-bybit  │ │ gateway-okx │
+│  REST + WS    │ │  REST + WS    │ │  REST + WS     │ │  REST + WS  │
+└──────┬────────┘ └───────┬───────┘ └───────┬────────┘ └──────┬──────┘
+       │                  │                  │                  │
+┌──────▼──────────────────▼──────────────────▼──────────────────▼──────────────┐
+│                              gateway-core                                    │
+│              Exchange trait, types, errors, config                            │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 | Crate | Description |
@@ -43,6 +43,7 @@ Write your trading logic once — run it on Binance, Bitget, Bybit, OKX, and mor
 | `gateway-binance` | Binance implementation — REST API + WebSocket streams |
 | `gateway-bitget` | Bitget implementation — REST API + WebSocket streams |
 | `gateway-bybit` | Bybit implementation — REST API + WebSocket streams |
+| `gateway-okx` | OKX implementation — REST API + WebSocket streams (Spot & Futures) |
 | `gateway-manager` | Multi-exchange orchestrator — parallel queries, merged streams |
 
 ## Quick Start
@@ -136,6 +137,14 @@ Same API, different exchange — demonstrates the unified trait:
 cargo run -p gateway-bybit --example basic_rest
 ```
 
+### basic_rest (OKX)
+
+Same API, different exchange — demonstrates the unified trait:
+
+```bash
+cargo run -p gateway-okx --example basic_rest
+```
+
 ### stream_trades
 
 WebSocket trade streaming — prints first 20 BTC/USDT trades:
@@ -159,6 +168,7 @@ cargo run -p gateway-manager --example multi_exchange
 | Binance | yes | yes | yes (combined stream) |
 | Bitget | yes | yes | yes (multi-topic) |
 | Bybit | yes | yes | yes (multi-topic) |
+| OKX | yes | yes | yes (multi-topic) |
 
 ## Project Structure
 
@@ -200,6 +210,17 @@ pulpo_loco/
     │   │   └── mapper.rs               # Symbol/interval conversion
     │   └── examples/
     │       └── basic_rest.rs
+    ├── gateway-okx/                    # OKX implementation (Spot & Futures)
+    │   ├── src/
+    │   │   ├── lib.rs                  # Okx, OkxSpot, OkxFutures
+    │   │   ├── spot/                   # Spot market
+    │   │   │   ├── mod.rs, rest.rs, ws.rs, mapper.rs
+    │   │   └── futures/                # Futures market
+    │   │       ├── mod.rs, rest.rs, ws.rs, mapper.rs
+    │   └── examples/
+    │       ├── basic_rest.rs
+    │       ├── futures_rest.rs
+    │       └── stream_trades.rs
     └── gateway-manager/                # Multi-exchange orchestrator
         ├── src/
         │   └── lib.rs                  # GatewayManager
