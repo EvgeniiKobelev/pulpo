@@ -5,5 +5,6 @@ members = [
     "crates/gateway-binance",
     "crates/gateway-bitget",
     "crates/gateway-bybit",
+    "crates/gateway-okx",
     "crates/gateway-manager",
 ]

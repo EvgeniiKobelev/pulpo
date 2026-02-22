@@ -492,6 +492,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "gateway-okx"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "gateway-core",
+ "reqwest",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
