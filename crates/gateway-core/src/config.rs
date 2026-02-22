@@ -38,23 +38,11 @@ impl Default for RestConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ExchangeConfig {
     pub rest: RestConfig,
     pub ws: WsConfig,
     pub api_key: Option<String>,
     pub api_secret: Option<String>,
     pub passphrase: Option<String>,
-}
-
-impl Default for ExchangeConfig {
-    fn default() -> Self {
-        Self {
-            rest: RestConfig::default(),
-            ws: WsConfig::default(),
-            api_key: None,
-            api_secret: None,
-            passphrase: None,
-        }
-    }
 }

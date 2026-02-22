@@ -86,10 +86,10 @@ async fn subscribe_and_stream(
                                     continue;
                                 }
                                 // Only forward messages that carry a "data" field.
-                                if json.get("data").is_some() {
-                                    if tx.send(json).await.is_err() {
-                                        break;
-                                    }
+                                if json.get("data").is_some()
+                                    && tx.send(json).await.is_err()
+                                {
+                                    break;
                                 }
                             }
                         }

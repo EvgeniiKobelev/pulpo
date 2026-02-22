@@ -61,10 +61,10 @@ async fn subscribe_and_stream(
                             continue;
                         }
                         // Only forward messages that carry a "topic" field.
-                        if json.get("topic").is_some() {
-                            if tx.send(json).await.is_err() {
-                                break;
-                            }
+                        if json.get("topic").is_some()
+                            && tx.send(json).await.is_err()
+                        {
+                            break;
                         }
                     }
                 }

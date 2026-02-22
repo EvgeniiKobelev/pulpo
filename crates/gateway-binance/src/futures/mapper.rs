@@ -521,7 +521,7 @@ pub fn parse_kline_row(row: &[serde_json::Value], symbol: Symbol) -> Option<Cand
         low: Decimal::from_str(row.get(3)?.as_str()?).ok()?,
         close: Decimal::from_str(row.get(4)?.as_str()?).ok()?,
         volume: Decimal::from_str(row.get(5)?.as_str()?).ok()?,
-        open_time_ms: row.get(0)?.as_u64()?,
+        open_time_ms: row.first()?.as_u64()?,
         close_time_ms: row.get(6)?.as_u64()?,
         is_closed: true,
     })
