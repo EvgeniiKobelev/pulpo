@@ -51,8 +51,12 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-gateway-core    = { path = "crates/gateway-core" }
-gateway-binance = { path = "crates/gateway-binance" }
+gateway-core    = { git = "https://github.com/EvgeniiKobelev/pulpo.git" }
+gateway-binance = { git = "https://github.com/EvgeniiKobelev/pulpo.git" }
+gateway-bitget  = { git = "https://github.com/EvgeniiKobelev/pulpo.git" }
+gateway-bybit   = { git = "https://github.com/EvgeniiKobelev/pulpo.git" }
+gateway-okx     = { git = "https://github.com/EvgeniiKobelev/pulpo.git" }
+gateway-manager = { git = "https://github.com/EvgeniiKobelev/pulpo.git" }
 tokio = { version = "1", features = ["full"] }
 ```
 
