@@ -1,6 +1,22 @@
-# pulpo_loco
+<div align="center">
 
-Unified Rust gateway for cryptocurrency exchanges. One trait, multiple exchanges, real-time WebSocket streams.
+<img src="logo.JPG" alt="Pulpo Loco" width="200">
+
+# Pulpo Loco
+
+**Unified Rust gateway for cryptocurrency exchanges**
+
+One trait. Multiple exchanges. Real-time WebSocket streams.
+
+[![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange?logo=rust)](https://www.rust-lang.org/)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+---
+
+Pulpo Loco provides a single `Exchange` trait that abstracts away the differences between crypto exchange APIs.
+Write your trading logic once — run it on Binance, Bitget, Bybit, OKX, and more.
+
+</div>
 
 ## Architecture
 
