@@ -1,10 +1,11 @@
 use crate::futures::mapper::*;
 use futures::{SinkExt, StreamExt};
 use gateway_core::*;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 const WS_URL: &str = "wss://ws.bitget.com/v2/ws/public";
 
@@ -15,6 +16,9 @@ const WS_URL: &str = "wss://ws.bitget.com/v2/ws/public";
 /// Connect to the Bitget V2 public futures WebSocket, subscribe to the given
 /// args, and return a [`BoxStream`] that yields parsed JSON `"data"` arrays
 /// for topic messages only (ping/pong and subscribe confirmations are filtered).
+///
+/// The connection is automatically re-established with exponential back-off
+/// whenever the remote side disconnects.
 async fn subscribe_and_stream(
     args: Vec<serde_json::Value>,
 ) -> Result<BoxStream<serde_json::Value>> {
@@ -26,10 +30,10 @@ async fn subscribe_and_stream(
                 message: e.to_string(),
             })?;
 
-    let (mut write, mut read) = ws_stream.split();
+    let (mut write, read) = ws_stream.split();
 
     // Send SUBSCRIBE message.
-    let sub = serde_json::json!({"op": "subscribe", "args": args});
+    let sub = serde_json::json!({"op": "subscribe", "args": args.clone()});
     write
         .send(Message::text(sub.to_string()))
         .await
@@ -42,75 +46,97 @@ async fn subscribe_and_stream(
 
     tokio::spawn(async move {
         let mut write = write;
+        let mut read = read;
+        let mut backoff = Duration::from_secs(1);
 
-        // Spawn periodic ping task -- Bitget expects literal "ping" text every 30s.
-        let ping_write = tx.clone();
-        let (ping_stop_tx, mut ping_stop_rx) = mpsc::channel::<()>(1);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        'outer: loop {
+            // Send initial ping for this connection.
+            let _ = write.send(Message::text("ping".to_string())).await;
+            let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+            ping_interval.tick().await; // skip first tick
+
+            // ---- message read loop with periodic ping ----
             loop {
                 tokio::select! {
-                    _ = interval.tick() => {
-                        // Keep the channel alive; actual ping sent in main loop.
+                    _ = ping_interval.tick() => {
+                        if write.send(Message::text("ping".to_string())).await.is_err() {
+                            break; // reconnect
+                        }
                     }
-                    _ = ping_stop_rx.recv() => break,
-                }
-            }
-            drop(ping_write);
-        });
-
-        // Send initial ping
-        let _ = write.send(Message::text("ping".to_string())).await;
-
-        let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(30));
-        // Skip the first tick (already sent initial ping)
-        ping_interval.tick().await;
-
-        loop {
-            tokio::select! {
-                _ = ping_interval.tick() => {
-                    if write.send(Message::text("ping".to_string())).await.is_err() {
-                        break;
-                    }
-                }
-                msg = read.next() => {
-                    match msg {
-                        Some(Ok(Message::Text(text))) => {
-                            // Bitget sends literal "pong" text in response to "ping"
-                            if text == "pong" {
-                                continue;
-                            }
-                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                                // Skip subscribe confirmation responses.
-                                if json.get("event").and_then(|v| v.as_str()) == Some("subscribe") {
+                    msg = read.next() => {
+                        match msg {
+                            Some(Ok(Message::Text(text))) => {
+                                // Bitget sends literal "pong" text in response to "ping"
+                                if text == "pong" {
                                     continue;
                                 }
-                                // Only forward messages that carry a "data" field.
-                                if json.get("data").is_some()
-                                    && tx.send(json).await.is_err()
-                                {
-                                    break;
+                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                                    // Skip subscribe confirmation responses.
+                                    if json.get("event").and_then(|v| v.as_str()) == Some("subscribe") {
+                                        continue;
+                                    }
+                                    // Only forward messages that carry a "data" field.
+                                    if json.get("data").is_some()
+                                        && tx.send(json).await.is_err()
+                                    {
+                                        break 'outer;
+                                    }
                                 }
                             }
+                            Some(Ok(Message::Ping(data))) => {
+                                let _ = write.send(Message::Pong(data)).await;
+                            }
+                            Some(Ok(Message::Close(_))) => {
+                                warn!("Bitget futures WS connection closed");
+                                break;
+                            }
+                            Some(Err(e)) => {
+                                warn!("Bitget futures WS error: {}", e);
+                                break;
+                            }
+                            None => {
+                                warn!("Bitget futures WS stream ended unexpectedly");
+                                break;
+                            }
+                            _ => {}
                         }
-                        Some(Ok(Message::Ping(data))) => {
-                            let _ = write.send(Message::Pong(data)).await;
+                    }
+                }
+            }
+
+            // ---- reconnect with exponential back-off ----
+            loop {
+                if tx.is_closed() {
+                    break 'outer;
+                }
+                warn!("Bitget futures WS reconnecting in {backoff:?}…");
+                tokio::time::sleep(backoff).await;
+                match connect_async(WS_URL).await {
+                    Ok((ws, _)) => {
+                        let (mut new_write, new_read) = ws.split();
+                        let sub = serde_json::json!({"op": "subscribe", "args": args.clone()});
+                        if new_write
+                            .send(Message::text(sub.to_string()))
+                            .await
+                            .is_err()
+                        {
+                            warn!("Bitget futures WS subscribe failed after reconnect");
+                            backoff = (backoff * 2).min(Duration::from_secs(30));
+                            continue;
                         }
-                        Some(Ok(Message::Close(_))) => {
-                            warn!("Bitget futures WS connection closed");
-                            break;
-                        }
-                        Some(Err(e)) => {
-                            warn!("Bitget futures WS error: {}", e);
-                            break;
-                        }
-                        None => break,
-                        _ => {}
+                        write = new_write;
+                        read = new_read;
+                        backoff = Duration::from_secs(1);
+                        info!("Bitget futures WS reconnected");
+                        break;
+                    }
+                    Err(e) => {
+                        warn!("Bitget futures WS reconnect failed: {}", e);
+                        backoff = (backoff * 2).min(Duration::from_secs(30));
                     }
                 }
             }
         }
-        let _ = ping_stop_tx.send(()).await;
         debug!("Bitget futures WS stream ended");
     });
 

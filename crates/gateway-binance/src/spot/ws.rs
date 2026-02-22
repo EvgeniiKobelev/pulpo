@@ -1,10 +1,11 @@
 use crate::spot::mapper::*;
 use futures::{SinkExt, StreamExt};
 use gateway_core::*;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 const WS_URL: &str = "wss://stream.binance.com:9443/ws";
 
@@ -18,22 +19,27 @@ const WS_URL: &str = "wss://stream.binance.com:9443/ws";
 /// If `streams` is non-empty a SUBSCRIBE frame is sent after connecting.
 /// For combined-stream URLs the subscription is implicit in the URL query string,
 /// so pass an empty `Vec`.
+///
+/// The connection is automatically re-established with exponential back-off
+/// whenever the remote side disconnects.
 async fn subscribe_and_stream(
     url: &str,
     streams: Vec<String>,
 ) -> Result<BoxStream<serde_json::Value>> {
-    let (ws_stream, _) = connect_async(url).await.map_err(|e| GatewayError::WebSocket {
+    let url = url.to_string();
+
+    let (ws_stream, _) = connect_async(&url).await.map_err(|e| GatewayError::WebSocket {
         exchange: ExchangeId::BinanceSpot,
         message: e.to_string(),
     })?;
 
-    let (mut write, mut read) = ws_stream.split();
+    let (mut write, read) = ws_stream.split();
 
     // Send SUBSCRIBE message when using the single-stream endpoint.
     if !streams.is_empty() {
         let sub = serde_json::json!({
             "method": "SUBSCRIBE",
-            "params": streams,
+            "params": streams.clone(),
             "id": 1
         });
         write
@@ -49,29 +55,78 @@ async fn subscribe_and_stream(
 
     tokio::spawn(async move {
         // Keep `write` alive so the connection is not half-closed.
-        let _write = write;
-        while let Some(msg) = read.next().await {
-            match msg {
-                Ok(Message::Text(text)) => {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                        // Skip subscription confirmation responses like {"result":null,"id":1}
-                        if json.get("result").is_some() && json.get("id").is_some() {
-                            continue;
-                        }
-                        if tx.send(json).await.is_err() {
-                            break;
+        let mut _write = write;
+        let mut read = read;
+        let mut backoff = Duration::from_secs(1);
+
+        'outer: loop {
+            // ---- message read loop ----
+            loop {
+                match read.next().await {
+                    Some(Ok(Message::Text(text))) => {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                            // Skip subscription confirmation responses like {"result":null,"id":1}
+                            if json.get("result").is_some() && json.get("id").is_some() {
+                                continue;
+                            }
+                            if tx.send(json).await.is_err() {
+                                break 'outer;
+                            }
                         }
                     }
+                    Some(Ok(Message::Close(_))) => {
+                        warn!("Binance WS connection closed");
+                        break;
+                    }
+                    Some(Err(e)) => {
+                        warn!("Binance WS error: {}", e);
+                        break;
+                    }
+                    None => {
+                        warn!("Binance WS stream ended unexpectedly");
+                        break;
+                    }
+                    _ => {}
                 }
-                Ok(Message::Close(_)) => {
-                    warn!("Binance WS connection closed");
-                    break;
+            }
+
+            // ---- reconnect with exponential back-off ----
+            loop {
+                if tx.is_closed() {
+                    break 'outer;
                 }
-                Err(e) => {
-                    warn!("Binance WS error: {}", e);
-                    break;
+                warn!("Binance WS reconnecting in {backoff:?}…");
+                tokio::time::sleep(backoff).await;
+                match connect_async(&url).await {
+                    Ok((ws, _)) => {
+                        let (mut new_write, new_read) = ws.split();
+                        if !streams.is_empty() {
+                            let sub = serde_json::json!({
+                                "method": "SUBSCRIBE",
+                                "params": streams.clone(),
+                                "id": 1
+                            });
+                            if new_write
+                                .send(Message::text(sub.to_string()))
+                                .await
+                                .is_err()
+                            {
+                                warn!("Binance WS subscribe failed after reconnect");
+                                backoff = (backoff * 2).min(Duration::from_secs(30));
+                                continue;
+                            }
+                        }
+                        _write = new_write;
+                        read = new_read;
+                        backoff = Duration::from_secs(1);
+                        info!("Binance WS reconnected");
+                        break;
+                    }
+                    Err(e) => {
+                        warn!("Binance WS reconnect failed: {}", e);
+                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                    }
                 }
-                _ => {}
             }
         }
         debug!("Binance WS stream ended");

@@ -1,10 +1,11 @@
 use crate::futures::mapper::*;
 use futures::{SinkExt, StreamExt};
 use gateway_core::*;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 const WS_URL: &str = "wss://stream.bybit.com/v5/public/linear";
 
@@ -15,6 +16,9 @@ const WS_URL: &str = "wss://stream.bybit.com/v5/public/linear";
 /// Connect to the Bybit V5 public linear WebSocket, subscribe to the given
 /// topics, and return a [`BoxStream`] that yields parsed JSON values for
 /// topic messages only (ping/pong and subscribe confirmations are filtered).
+///
+/// The connection is automatically re-established with exponential back-off
+/// whenever the remote side disconnects.
 async fn subscribe_and_stream(
     topics: Vec<String>,
 ) -> Result<BoxStream<serde_json::Value>> {
@@ -26,10 +30,10 @@ async fn subscribe_and_stream(
                 message: e.to_string(),
             })?;
 
-    let (mut write, mut read) = ws_stream.split();
+    let (mut write, read) = ws_stream.split();
 
     // Send SUBSCRIBE message.
-    let sub = serde_json::json!({"op": "subscribe", "args": topics});
+    let sub = serde_json::json!({"op": "subscribe", "args": topics.clone()});
     write
         .send(Message::text(sub.to_string()))
         .await
@@ -42,44 +46,87 @@ async fn subscribe_and_stream(
 
     tokio::spawn(async move {
         let mut write = write;
-        while let Some(msg) = read.next().await {
-            match msg {
-                Ok(Message::Text(text)) => {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                        // Handle Bybit text-based ping -- respond with pong.
-                        if json.get("op").and_then(|v| v.as_str()) == Some("ping") {
-                            let pong = serde_json::json!({"op": "pong"});
-                            let _ = write.send(Message::text(pong.to_string())).await;
-                            continue;
-                        }
-                        // Skip subscribe confirmation responses.
-                        if json.get("op").and_then(|v| v.as_str()) == Some("subscribe") {
-                            continue;
-                        }
-                        // Skip pong responses (our ping reply echoes).
-                        if json.get("op").and_then(|v| v.as_str()) == Some("pong") {
-                            continue;
-                        }
-                        // Only forward messages that carry a "topic" field.
-                        if json.get("topic").is_some()
-                            && tx.send(json).await.is_err()
-                        {
-                            break;
+        let mut read = read;
+        let mut backoff = Duration::from_secs(1);
+
+        'outer: loop {
+            // ---- message read loop ----
+            loop {
+                match read.next().await {
+                    Some(Ok(Message::Text(text))) => {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                            // Handle Bybit text-based ping -- respond with pong.
+                            if json.get("op").and_then(|v| v.as_str()) == Some("ping") {
+                                let pong = serde_json::json!({"op": "pong"});
+                                let _ = write.send(Message::text(pong.to_string())).await;
+                                continue;
+                            }
+                            // Skip subscribe confirmation responses.
+                            if json.get("op").and_then(|v| v.as_str()) == Some("subscribe") {
+                                continue;
+                            }
+                            // Skip pong responses (our ping reply echoes).
+                            if json.get("op").and_then(|v| v.as_str()) == Some("pong") {
+                                continue;
+                            }
+                            // Only forward messages that carry a "topic" field.
+                            if json.get("topic").is_some()
+                                && tx.send(json).await.is_err()
+                            {
+                                break 'outer;
+                            }
                         }
                     }
+                    Some(Ok(Message::Ping(data))) => {
+                        let _ = write.send(Message::Pong(data)).await;
+                    }
+                    Some(Ok(Message::Close(_))) => {
+                        warn!("Bybit Futures WS connection closed");
+                        break;
+                    }
+                    Some(Err(e)) => {
+                        warn!("Bybit Futures WS error: {}", e);
+                        break;
+                    }
+                    None => {
+                        warn!("Bybit Futures WS stream ended unexpectedly");
+                        break;
+                    }
+                    _ => {}
                 }
-                Ok(Message::Ping(data)) => {
-                    let _ = write.send(Message::Pong(data)).await;
+            }
+
+            // ---- reconnect with exponential back-off ----
+            loop {
+                if tx.is_closed() {
+                    break 'outer;
                 }
-                Ok(Message::Close(_)) => {
-                    warn!("Bybit Futures WS connection closed");
-                    break;
+                warn!("Bybit Futures WS reconnecting in {backoff:?}…");
+                tokio::time::sleep(backoff).await;
+                match connect_async(WS_URL).await {
+                    Ok((ws, _)) => {
+                        let (mut new_write, new_read) = ws.split();
+                        let sub = serde_json::json!({"op": "subscribe", "args": topics.clone()});
+                        if new_write
+                            .send(Message::text(sub.to_string()))
+                            .await
+                            .is_err()
+                        {
+                            warn!("Bybit Futures WS subscribe failed after reconnect");
+                            backoff = (backoff * 2).min(Duration::from_secs(30));
+                            continue;
+                        }
+                        write = new_write;
+                        read = new_read;
+                        backoff = Duration::from_secs(1);
+                        info!("Bybit Futures WS reconnected");
+                        break;
+                    }
+                    Err(e) => {
+                        warn!("Bybit Futures WS reconnect failed: {}", e);
+                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                    }
                 }
-                Err(e) => {
-                    warn!("Bybit Futures WS error: {}", e);
-                    break;
-                }
-                _ => {}
             }
         }
         debug!("Bybit Futures WS stream ended");
