@@ -1,15 +1,17 @@
 //! Multi-exchange example using GatewayManager.
 //!
 //! Demonstrates:
-//! - Registering multiple exchanges
+//! - Registering spot and futures exchanges
 //! - Parallel ticker fetching across all exchanges
 //! - BTC/USDT price comparison between Binance and Bybit
+//! - Funding rate comparison across all futures exchanges
 //! - Merged trade streams from multiple exchanges
 //!
 //! Run: cargo run -p gateway-manager --example multi_exchange
 
-use gateway_binance::Binance;
-use gateway_bybit::Bybit;
+use gateway_binance::{BinanceFutures, BinanceSpot};
+use gateway_bitget::BitgetFutures;
+use gateway_bybit::{BybitFutures, BybitSpot};
 use gateway_core::{ExchangeId, Symbol};
 use gateway_manager::GatewayManager;
 use tokio_stream::StreamExt;
@@ -18,27 +20,34 @@ use tokio_stream::StreamExt;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    // ── Setup ──
+    // -- Setup --
     let mut manager = GatewayManager::new();
-    manager.register(Binance::public());
-    manager.register(Bybit::public());
 
-    println!("Registered {} exchanges\n", manager.all().len());
+    // Register spot exchanges
+    manager.register(BinanceSpot::public());
+    manager.register(BybitSpot::public());
+
+    // Register futures exchanges (also available as regular Exchange)
+    manager.register_futures(BinanceFutures::public());
+    manager.register_futures(BybitFutures::public());
+    manager.register_futures(BitgetFutures::public());
+
+    println!("Registered {} total exchanges\n", manager.all().len());
 
     let btc = Symbol::new("BTC", "USDT");
 
-    // ── Parallel Ticker Fetch ──
+    // -- Parallel Ticker Fetch --
     println!("=== All Tickers (parallel fetch) ===");
     let results = manager.all_tickers_everywhere().await;
     for (id, result) in &results {
         match result {
             Ok(tickers) => println!("  {}: {} tickers", id, tickers.len()),
-            Err(e) => println!("  {}: error — {}", id, e),
+            Err(e) => println!("  {}: error -- {}", id, e),
         }
     }
     println!();
 
-    // ── Price Comparison ──
+    // -- Price Comparison --
     println!("=== BTC/USDT Price Comparison ===");
     for (id, result) in &results {
         if let Ok(tickers) = result {
@@ -49,8 +58,19 @@ async fn main() -> anyhow::Result<()> {
     }
     println!();
 
-    // ── Merged Trade Streams ──
-    println!("=== Merged Trade Stream (BTC/USDT from both exchanges, first 20) ===\n");
+    // -- Funding Rate Comparison --
+    println!("=== BTC/USDT Funding Rates (all futures exchanges) ===");
+    let funding_results = manager.all_funding_rates(&btc).await;
+    for (id, result) in &funding_results {
+        match result {
+            Ok(fr) => println!("  {}: rate={}", id, fr.rate),
+            Err(e) => println!("  {}: error -- {}", id, e),
+        }
+    }
+    println!();
+
+    // -- Merged Trade Streams --
+    println!("=== Merged Trade Stream (BTC/USDT from spot exchanges, first 20) ===\n");
     let pairs = vec![
         (ExchangeId::BinanceSpot, btc.clone()),
         (ExchangeId::BybitSpot, btc.clone()),
@@ -62,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
     while let Some(trade) = stream.next().await {
         count += 1;
         println!(
-            "#{:>2}  [{:>7}]  {:?}  {} @ {}",
+            "#{:>2}  [{:>14}]  {:?}  {} @ {}",
             count, trade.exchange, trade.side, trade.qty, trade.price,
         );
 
