@@ -12,6 +12,14 @@ tokio = { version = "1", features = ["sync", "rt"] }
 gateway-binance = { path = "../gateway-binance", optional = true }
 gateway-bybit = { path = "../gateway-bybit", optional = true }
 
+[dev-dependencies]
+anyhow = "1"
+tracing-subscriber = "0.3"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+gateway-binance = { path = "../gateway-binance" }
+gateway-bybit = { path = "../gateway-bybit" }
+
 [features]
 default = ["binance", "bybit"]
 binance = ["dep:gateway-binance"]
