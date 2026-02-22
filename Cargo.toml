@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/gateway-core",
     "crates/gateway-binance",
+    "crates/gateway-bitget",
     "crates/gateway-bybit",
     "crates/gateway-manager",
 ]

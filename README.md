@@ -5,26 +5,27 @@ Unified Rust gateway for cryptocurrency exchanges. One trait, multiple exchanges
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────┐
-│              gateway-manager                  │
-│     GatewayManager: register / query / merge  │
-└────────┬───────────────────┬─────────────────┘
-         │                   │
-┌────────▼────────┐ ┌───────▼─────────┐
-│ gateway-binance  │ │  gateway-bybit   │
-│  REST + WS       │ │  REST + WS       │
-└────────┬────────┘ └───────┬─────────┘
-         │                   │
-┌────────▼───────────────────▼─────────────────┐
-│                gateway-core                    │
-│  Exchange trait, types, errors, config          │
-└────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                      gateway-manager                         │
+│          GatewayManager: register / query / merge            │
+└────────┬──────────────────┬──────────────────┬──────────────┘
+         │                  │                  │
+┌────────▼────────┐ ┌──────▼────────┐ ┌───────▼─────────┐
+│ gateway-binance  │ │ gateway-bitget │ │  gateway-bybit   │
+│  REST + WS       │ │  REST + WS     │ │  REST + WS       │
+└────────┬────────┘ └──────┬────────┘ └───────┬─────────┘
+         │                  │                  │
+┌────────▼──────────────────▼──────────────────▼─────────────┐
+│                       gateway-core                          │
+│       Exchange trait, types, errors, config                  │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 | Crate | Description |
 |---|---|
 | `gateway-core` | `Exchange` trait, unified types (`Symbol`, `OrderBook`, `Trade`, `Candle`, `Ticker`), error handling |
 | `gateway-binance` | Binance implementation — REST API + WebSocket streams |
+| `gateway-bitget` | Bitget implementation — REST API + WebSocket streams |
 | `gateway-bybit` | Bybit implementation — REST API + WebSocket streams |
 | `gateway-manager` | Multi-exchange orchestrator — parallel queries, merged streams |
 
@@ -99,6 +100,14 @@ Exchange info, ticker, order book, trades, and candles:
 cargo run -p gateway-binance --example basic_rest
 ```
 
+### basic_rest (Bitget)
+
+Same API, different exchange — demonstrates the unified trait:
+
+```bash
+cargo run -p gateway-bitget --example basic_rest
+```
+
 ### basic_rest (Bybit)
 
 Same API, different exchange — demonstrates the unified trait:
@@ -128,6 +137,7 @@ cargo run -p gateway-manager --example multi_exchange
 | Exchange | REST | WebSocket | Batch WS |
 |---|---|---|---|
 | Binance | yes | yes | yes (combined stream) |
+| Bitget | yes | yes | yes (multi-topic) |
 | Bybit | yes | yes | yes (multi-topic) |
 
 ## Project Structure
@@ -154,6 +164,14 @@ pulpo_loco/
     │   └── examples/
     │       ├── basic_rest.rs
     │       └── stream_trades.rs
+    ├── gateway-bitget/                 # Bitget implementation
+    │   ├── src/
+    │   │   ├── lib.rs                  # Bitget struct + Exchange impl
+    │   │   ├── rest.rs                 # REST client
+    │   │   ├── ws.rs                   # WebSocket streams
+    │   │   └── mapper.rs               # Symbol/interval conversion
+    │   └── examples/
+    │       └── basic_rest.rs
     ├── gateway-bybit/                  # Bybit implementation
     │   ├── src/
     │   │   ├── lib.rs                  # Bybit struct + Exchange impl

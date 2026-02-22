@@ -6,6 +6,7 @@ use std::fmt;
 #[serde(rename_all = "lowercase")]
 pub enum ExchangeId {
     Binance,
+    Bitget,
     Bybit,
     Okx,
     Gate,
@@ -18,6 +19,7 @@ impl fmt::Display for ExchangeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Binance => write!(f, "binance"),
+            Self::Bitget => write!(f, "bitget"),
             Self::Bybit => write!(f, "bybit"),
             Self::Okx => write!(f, "okx"),
             Self::Gate => write!(f, "gate"),

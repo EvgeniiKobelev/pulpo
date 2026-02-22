@@ -10,6 +10,7 @@ futures = "0.3"
 tokio = { version = "1", features = ["sync", "rt"] }
 
 gateway-binance = { path = "../gateway-binance", optional = true }
+gateway-bitget = { path = "../gateway-bitget", optional = true }
 gateway-bybit = { path = "../gateway-bybit", optional = true }
 
 [dev-dependencies]
@@ -18,10 +19,12 @@ tracing-subscriber = "0.3"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 gateway-binance = { path = "../gateway-binance" }
+gateway-bitget = { path = "../gateway-bitget" }
 gateway-bybit = { path = "../gateway-bybit" }
 
 [features]
-default = ["binance", "bybit"]
+default = ["binance", "bitget", "bybit"]
 binance = ["dep:gateway-binance"]
+bitget = ["dep:gateway-bitget"]
 bybit = ["dep:gateway-bybit"]
-all = ["binance", "bybit"]
+all = ["binance", "bitget", "bybit"]

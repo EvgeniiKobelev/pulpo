@@ -421,6 +421,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "gateway-bitget"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "gateway-core",
+ "reqwest",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "gateway-bybit"
 version = "0.1.0"
 dependencies = [
@@ -462,6 +483,7 @@ dependencies = [
  "async-trait",
  "futures",
  "gateway-binance",
+ "gateway-bitget",
  "gateway-bybit",
  "gateway-core",
  "tokio",
