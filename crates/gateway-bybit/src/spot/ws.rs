@@ -1,4 +1,4 @@
-use crate::mapper::*;
+use crate::spot::mapper::*;
 use futures::{SinkExt, StreamExt};
 use gateway_core::*;
 use tokio::sync::mpsc;
@@ -22,7 +22,7 @@ async fn subscribe_and_stream(
         connect_async(WS_URL)
             .await
             .map_err(|e| GatewayError::WebSocket {
-                exchange: ExchangeId::Bybit,
+                exchange: ExchangeId::BybitSpot,
                 message: e.to_string(),
             })?;
 
@@ -34,7 +34,7 @@ async fn subscribe_and_stream(
         .send(Message::text(sub.to_string()))
         .await
         .map_err(|e| GatewayError::WebSocket {
-            exchange: ExchangeId::Bybit,
+            exchange: ExchangeId::BybitSpot,
             message: e.to_string(),
         })?;
 

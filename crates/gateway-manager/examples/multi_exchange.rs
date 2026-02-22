@@ -52,8 +52,8 @@ async fn main() -> anyhow::Result<()> {
     // ── Merged Trade Streams ──
     println!("=== Merged Trade Stream (BTC/USDT from both exchanges, first 20) ===\n");
     let pairs = vec![
-        (ExchangeId::Binance, btc.clone()),
-        (ExchangeId::Bybit, btc.clone()),
+        (ExchangeId::BinanceSpot, btc.clone()),
+        (ExchangeId::BybitSpot, btc.clone()),
     ];
 
     let mut stream = manager.stream_trades_multi(&pairs).await?;

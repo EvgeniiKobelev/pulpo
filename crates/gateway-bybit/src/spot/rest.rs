@@ -1,5 +1,5 @@
 use gateway_core::*;
-use crate::mapper::*;
+use crate::spot::mapper::*;
 use reqwest::Client;
 
 const BASE_URL: &str = "https://api.bybit.com";
@@ -28,7 +28,7 @@ impl BybitRest {
     async fn fetch<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
         let resp = self.client.get(url).send().await.map_err(|e| {
             GatewayError::Rest {
-                exchange: ExchangeId::Bybit,
+                exchange: ExchangeId::BybitSpot,
                 message: e.to_string(),
                 status: None,
             }
@@ -38,7 +38,7 @@ impl BybitRest {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
             return Err(GatewayError::Rest {
-                exchange: ExchangeId::Bybit,
+                exchange: ExchangeId::BybitSpot,
                 message: body,
                 status: Some(status),
             });
@@ -46,14 +46,14 @@ impl BybitRest {
 
         let wrapper: BybitResponse<T> = resp.json().await.map_err(|e| {
             GatewayError::Parse {
-                exchange: ExchangeId::Bybit,
+                exchange: ExchangeId::BybitSpot,
                 message: e.to_string(),
             }
         })?;
 
         if wrapper.ret_code != 0 {
             return Err(GatewayError::Rest {
-                exchange: ExchangeId::Bybit,
+                exchange: ExchangeId::BybitSpot,
                 message: format!("retCode={}: {}", wrapper.ret_code, wrapper.ret_msg),
                 status: None,
             });
@@ -137,7 +137,7 @@ impl BybitRest {
             .next()
             .map(|t| t.into_ticker())
             .ok_or_else(|| GatewayError::SymbolNotFound {
-                exchange: ExchangeId::Bybit,
+                exchange: ExchangeId::BybitSpot,
                 symbol: symbol.to_string(),
             })
     }

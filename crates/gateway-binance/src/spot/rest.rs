@@ -1,5 +1,5 @@
 use gateway_core::*;
-use crate::mapper::*;
+use crate::spot::mapper::*;
 use reqwest::Client;
 
 const BASE_URL: &str = "https://api.binance.com";
@@ -26,7 +26,7 @@ impl BinanceRest {
         let url = format!("{}/api/v3/exchangeInfo", self.base_url);
         let resp = self.client.get(&url).send().await
             .map_err(|e| GatewayError::Rest {
-                exchange: ExchangeId::Binance,
+                exchange: ExchangeId::BinanceSpot,
                 message: e.to_string(),
                 status: None,
             })?;
@@ -35,7 +35,7 @@ impl BinanceRest {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
             return Err(GatewayError::Rest {
-                exchange: ExchangeId::Binance,
+                exchange: ExchangeId::BinanceSpot,
                 message: body,
                 status: Some(status),
             });
@@ -43,7 +43,7 @@ impl BinanceRest {
 
         let raw: BinanceExchangeInfoRaw = resp.json().await
             .map_err(|e| GatewayError::Parse {
-                exchange: ExchangeId::Binance,
+                exchange: ExchangeId::BinanceSpot,
                 message: e.to_string(),
             })?;
         Ok(raw.into_exchange_info())
@@ -59,7 +59,7 @@ impl BinanceRest {
         );
         let resp = self.client.get(&url).send().await
             .map_err(|e| GatewayError::Rest {
-                exchange: ExchangeId::Binance,
+                exchange: ExchangeId::BinanceSpot,
                 message: e.to_string(),
                 status: None,
             })?;
@@ -68,7 +68,7 @@ impl BinanceRest {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
             return Err(GatewayError::Rest {
-                exchange: ExchangeId::Binance,
+                exchange: ExchangeId::BinanceSpot,
                 message: body,
                 status: Some(status),
             });
@@ -76,7 +76,7 @@ impl BinanceRest {
 
         let raw: BinanceOrderBookRaw = resp.json().await
             .map_err(|e| GatewayError::Parse {
-                exchange: ExchangeId::Binance,
+                exchange: ExchangeId::BinanceSpot,
                 message: e.to_string(),
             })?;
         Ok(raw.into_orderbook(symbol.clone()))
@@ -92,7 +92,7 @@ impl BinanceRest {
         );
         let resp = self.client.get(&url).send().await
             .map_err(|e| GatewayError::Rest {
-                exchange: ExchangeId::Binance,
+                exchange: ExchangeId::BinanceSpot,
                 message: e.to_string(),
                 status: None,
             })?;
@@ -101,7 +101,7 @@ impl BinanceRest {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
             return Err(GatewayError::Rest {
-                exchange: ExchangeId::Binance,
+                exchange: ExchangeId::BinanceSpot,
                 message: body,
                 status: Some(status),
             });
@@ -109,7 +109,7 @@ impl BinanceRest {
 
         let raw: Vec<BinanceTradeRaw> = resp.json().await
             .map_err(|e| GatewayError::Parse {
-                exchange: ExchangeId::Binance,
+                exchange: ExchangeId::BinanceSpot,
                 message: e.to_string(),
             })?;
         Ok(raw.into_iter().map(|t| t.into_trade(symbol.clone())).collect())
@@ -131,7 +131,7 @@ impl BinanceRest {
         );
         let resp = self.client.get(&url).send().await
             .map_err(|e| GatewayError::Rest {
-                exchange: ExchangeId::Binance,
+                exchange: ExchangeId::BinanceSpot,
                 message: e.to_string(),
                 status: None,
             })?;
@@ -140,7 +140,7 @@ impl BinanceRest {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
             return Err(GatewayError::Rest {
-                exchange: ExchangeId::Binance,
+                exchange: ExchangeId::BinanceSpot,
                 message: body,
                 status: Some(status),
             });
@@ -148,7 +148,7 @@ impl BinanceRest {
 
         let rows: Vec<Vec<serde_json::Value>> = resp.json().await
             .map_err(|e| GatewayError::Parse {
-                exchange: ExchangeId::Binance,
+                exchange: ExchangeId::BinanceSpot,
                 message: e.to_string(),
             })?;
         Ok(rows
@@ -166,7 +166,7 @@ impl BinanceRest {
         );
         let resp = self.client.get(&url).send().await
             .map_err(|e| GatewayError::Rest {
-                exchange: ExchangeId::Binance,
+                exchange: ExchangeId::BinanceSpot,
                 message: e.to_string(),
                 status: None,
             })?;
@@ -175,7 +175,7 @@ impl BinanceRest {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
             return Err(GatewayError::Rest {
-                exchange: ExchangeId::Binance,
+                exchange: ExchangeId::BinanceSpot,
                 message: body,
                 status: Some(status),
             });
@@ -183,7 +183,7 @@ impl BinanceRest {
 
         let raw: BinanceTickerRaw = resp.json().await
             .map_err(|e| GatewayError::Parse {
-                exchange: ExchangeId::Binance,
+                exchange: ExchangeId::BinanceSpot,
                 message: e.to_string(),
             })?;
         Ok(raw.into_ticker())
@@ -194,7 +194,7 @@ impl BinanceRest {
         let url = format!("{}/api/v3/ticker/24hr", self.base_url);
         let resp = self.client.get(&url).send().await
             .map_err(|e| GatewayError::Rest {
-                exchange: ExchangeId::Binance,
+                exchange: ExchangeId::BinanceSpot,
                 message: e.to_string(),
                 status: None,
             })?;
@@ -203,7 +203,7 @@ impl BinanceRest {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
             return Err(GatewayError::Rest {
-                exchange: ExchangeId::Binance,
+                exchange: ExchangeId::BinanceSpot,
                 message: body,
                 status: Some(status),
             });
@@ -211,7 +211,7 @@ impl BinanceRest {
 
         let raw: Vec<BinanceTickerRaw> = resp.json().await
             .map_err(|e| GatewayError::Parse {
-                exchange: ExchangeId::Binance,
+                exchange: ExchangeId::BinanceSpot,
                 message: e.to_string(),
             })?;
         Ok(raw.into_iter().map(|t| t.into_ticker()).collect())

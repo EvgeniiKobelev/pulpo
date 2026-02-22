@@ -87,7 +87,7 @@ impl BinanceExchangeInfoRaw {
             .collect();
 
         ExchangeInfo {
-            exchange: ExchangeId::Binance,
+            exchange: ExchangeId::BinanceSpot,
             symbols,
         }
     }
@@ -108,7 +108,7 @@ pub struct BinanceOrderBookRaw {
 impl BinanceOrderBookRaw {
     pub fn into_orderbook(self, symbol: Symbol) -> OrderBook {
         OrderBook {
-            exchange: ExchangeId::Binance,
+            exchange: ExchangeId::BinanceSpot,
             symbol,
             bids: parse_levels(&self.bids),
             asks: parse_levels(&self.asks),
@@ -135,7 +135,7 @@ pub struct BinanceTradeRaw {
 impl BinanceTradeRaw {
     pub fn into_trade(self, symbol: Symbol) -> Trade {
         Trade {
-            exchange: ExchangeId::Binance,
+            exchange: ExchangeId::BinanceSpot,
             symbol,
             price: Decimal::from_str(&self.price).unwrap_or_default(),
             qty: Decimal::from_str(&self.qty).unwrap_or_default(),
@@ -174,7 +174,7 @@ impl BinanceTickerRaw {
     pub fn into_ticker(self) -> Ticker {
         let symbol = binance_symbol_to_unified(&self.symbol);
         Ticker {
-            exchange: ExchangeId::Binance,
+            exchange: ExchangeId::BinanceSpot,
             symbol,
             last_price: Decimal::from_str(&self.last_price).unwrap_or_default(),
             bid: Decimal::from_str(&self.bid_price).ok(),
@@ -208,7 +208,7 @@ impl BinanceWsDepthRaw {
     pub fn into_orderbook(self) -> OrderBook {
         let symbol = binance_symbol_to_unified(&self.symbol);
         OrderBook {
-            exchange: ExchangeId::Binance,
+            exchange: ExchangeId::BinanceSpot,
             symbol,
             bids: parse_levels(&self.bids),
             asks: parse_levels(&self.asks),
@@ -242,7 +242,7 @@ impl BinanceWsTradeRaw {
     pub fn into_trade(self) -> Trade {
         let symbol = binance_symbol_to_unified(&self.symbol);
         Trade {
-            exchange: ExchangeId::Binance,
+            exchange: ExchangeId::BinanceSpot,
             symbol,
             price: Decimal::from_str(&self.price).unwrap_or_default(),
             qty: Decimal::from_str(&self.qty).unwrap_or_default(),
@@ -294,7 +294,7 @@ impl BinanceWsKlineMsg {
     pub fn into_candle(self) -> Candle {
         let symbol = binance_symbol_to_unified(&self.symbol);
         Candle {
-            exchange: ExchangeId::Binance,
+            exchange: ExchangeId::BinanceSpot,
             symbol,
             open: Decimal::from_str(&self.k.open).unwrap_or_default(),
             high: Decimal::from_str(&self.k.high).unwrap_or_default(),
@@ -386,7 +386,7 @@ pub fn interval_to_binance(interval: Interval) -> &'static str {
 /// `[openTime, open, high, low, close, volume, closeTime, ...]`
 pub fn parse_kline_row(row: &[serde_json::Value], symbol: Symbol) -> Option<Candle> {
     Some(Candle {
-        exchange: ExchangeId::Binance,
+        exchange: ExchangeId::BinanceSpot,
         symbol,
         open: Decimal::from_str(row.get(1)?.as_str()?).ok()?,
         high: Decimal::from_str(row.get(2)?.as_str()?).ok()?,
@@ -490,7 +490,7 @@ mod tests {
         let symbol = Symbol::new("BTC", "USDT");
         let ob = raw.into_orderbook(symbol);
 
-        assert_eq!(ob.exchange, ExchangeId::Binance);
+        assert_eq!(ob.exchange, ExchangeId::BinanceSpot);
         assert_eq!(ob.symbol, Symbol::new("BTC", "USDT"));
         assert_eq!(ob.bids.len(), 2);
         assert_eq!(ob.asks.len(), 1);
@@ -515,7 +515,7 @@ mod tests {
         .unwrap();
 
         let ticker = raw.into_ticker();
-        assert_eq!(ticker.exchange, ExchangeId::Binance);
+        assert_eq!(ticker.exchange, ExchangeId::BinanceSpot);
         assert_eq!(ticker.symbol.base, "BTC");
         assert_eq!(ticker.symbol.quote, "USDT");
         assert_eq!(ticker.last_price, dec!(50000.00));
@@ -536,7 +536,7 @@ mod tests {
             is_buyer_maker: true,
         };
         let trade = raw.into_trade(Symbol::new("BTC", "USDT"));
-        assert_eq!(trade.exchange, ExchangeId::Binance);
+        assert_eq!(trade.exchange, ExchangeId::BinanceSpot);
         assert_eq!(trade.price, dec!(50000.50));
         assert_eq!(trade.qty, dec!(0.01));
         assert_eq!(trade.side, Side::Sell);
@@ -619,7 +619,7 @@ mod tests {
         .unwrap();
 
         let candle = raw.into_candle();
-        assert_eq!(candle.exchange, ExchangeId::Binance);
+        assert_eq!(candle.exchange, ExchangeId::BinanceSpot);
         assert_eq!(candle.symbol.base, "BTC");
         assert_eq!(candle.open, dec!(50000.00));
         assert_eq!(candle.close, dec!(50100.00));
@@ -637,7 +637,7 @@ mod tests {
         .unwrap();
 
         let candle = parse_kline_row(&row, Symbol::new("BTC", "USDT")).unwrap();
-        assert_eq!(candle.exchange, ExchangeId::Binance);
+        assert_eq!(candle.exchange, ExchangeId::BinanceSpot);
         assert_eq!(candle.open, dec!(50000.00));
         assert_eq!(candle.high, dec!(50200.00));
         assert_eq!(candle.low, dec!(49900.00));
@@ -678,7 +678,7 @@ mod tests {
         .unwrap();
 
         let info = raw.into_exchange_info();
-        assert_eq!(info.exchange, ExchangeId::Binance);
+        assert_eq!(info.exchange, ExchangeId::BinanceSpot);
         assert_eq!(info.symbols.len(), 2);
 
         let btc = &info.symbols[0];

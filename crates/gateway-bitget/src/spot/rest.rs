@@ -1,4 +1,4 @@
-use crate::mapper::*;
+use crate::spot::mapper::*;
 use gateway_core::*;
 use reqwest::Client;
 
@@ -28,7 +28,7 @@ impl BitgetRest {
     async fn fetch<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
         let resp = self.client.get(url).send().await.map_err(|e| {
             GatewayError::Rest {
-                exchange: ExchangeId::Bitget,
+                exchange: ExchangeId::BitgetSpot,
                 message: e.to_string(),
                 status: None,
             }
@@ -38,7 +38,7 @@ impl BitgetRest {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
             return Err(GatewayError::Rest {
-                exchange: ExchangeId::Bitget,
+                exchange: ExchangeId::BitgetSpot,
                 message: body,
                 status: Some(status),
             });
@@ -46,14 +46,14 @@ impl BitgetRest {
 
         let wrapper: BitgetResponse<T> = resp.json().await.map_err(|e| {
             GatewayError::Parse {
-                exchange: ExchangeId::Bitget,
+                exchange: ExchangeId::BitgetSpot,
                 message: e.to_string(),
             }
         })?;
 
         if wrapper.code != "00000" {
             return Err(GatewayError::Rest {
-                exchange: ExchangeId::Bitget,
+                exchange: ExchangeId::BitgetSpot,
                 message: format!("code={}: {}", wrapper.code, wrapper.msg),
                 status: None,
             });
@@ -132,7 +132,7 @@ impl BitgetRest {
             .next()
             .map(|t| t.into_ticker())
             .ok_or_else(|| GatewayError::SymbolNotFound {
-                exchange: ExchangeId::Bitget,
+                exchange: ExchangeId::BitgetSpot,
                 symbol: symbol.to_string(),
             })
     }

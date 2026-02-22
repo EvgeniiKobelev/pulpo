@@ -57,7 +57,7 @@ pub fn symbols_to_exchange_info(symbols: Vec<BitgetSymbolRaw>) -> ExchangeInfo {
         .collect();
 
     ExchangeInfo {
-        exchange: ExchangeId::Bitget,
+        exchange: ExchangeId::BitgetSpot,
         symbols: list,
     }
 }
@@ -76,7 +76,7 @@ pub struct BitgetOrderBookData {
 impl BitgetOrderBookData {
     pub fn into_orderbook(self, symbol: Symbol) -> OrderBook {
         OrderBook {
-            exchange: ExchangeId::Bitget,
+            exchange: ExchangeId::BitgetSpot,
             symbol,
             bids: parse_levels(&self.bids),
             asks: parse_levels(&self.asks),
@@ -109,7 +109,7 @@ impl BitgetTradeRaw {
             _ => Side::Sell,
         };
         Trade {
-            exchange: ExchangeId::Bitget,
+            exchange: ExchangeId::BitgetSpot,
             symbol,
             price: Decimal::from_str(&self.price).unwrap_or_default(),
             qty: Decimal::from_str(&self.size).unwrap_or_default(),
@@ -144,7 +144,7 @@ impl BitgetTickerRaw {
     pub fn into_ticker(self) -> Ticker {
         let symbol = bitget_symbol_to_unified(&self.symbol);
         Ticker {
-            exchange: ExchangeId::Bitget,
+            exchange: ExchangeId::BitgetSpot,
             symbol,
             last_price: Decimal::from_str(&self.last_pr).unwrap_or_default(),
             bid: Decimal::from_str(&self.bid_pr).ok(),
@@ -175,7 +175,7 @@ pub fn parse_kline_row(row: &[String], symbol: Symbol) -> Option<Candle> {
     let volume = Decimal::from_str(&row[5]).ok()?;
 
     Some(Candle {
-        exchange: ExchangeId::Bitget,
+        exchange: ExchangeId::BitgetSpot,
         symbol,
         open,
         high,
@@ -212,7 +212,7 @@ impl BitgetWsTradeRaw {
             _ => Side::Sell,
         };
         Trade {
-            exchange: ExchangeId::Bitget,
+            exchange: ExchangeId::BitgetSpot,
             symbol,
             price: Decimal::from_str(&self.price).unwrap_or_default(),
             qty: Decimal::from_str(&self.size).unwrap_or_default(),
@@ -236,7 +236,7 @@ impl BitgetWsOrderBook {
     pub fn into_orderbook(self, symbol: Symbol) -> OrderBook {
         let seq = self.seq.as_deref().and_then(|s| s.parse::<u64>().ok());
         OrderBook {
-            exchange: ExchangeId::Bitget,
+            exchange: ExchangeId::BitgetSpot,
             symbol,
             bids: parse_levels(&self.bids),
             asks: parse_levels(&self.asks),
@@ -427,7 +427,7 @@ mod tests {
         .unwrap();
 
         let ob = raw.into_orderbook(Symbol::new("BTC", "USDT"));
-        assert_eq!(ob.exchange, ExchangeId::Bitget);
+        assert_eq!(ob.exchange, ExchangeId::BitgetSpot);
         assert_eq!(ob.symbol.base, "BTC");
         assert_eq!(ob.symbol.quote, "USDT");
         assert_eq!(ob.bids.len(), 2);
@@ -455,7 +455,7 @@ mod tests {
         .unwrap();
 
         let trade = raw.into_trade();
-        assert_eq!(trade.exchange, ExchangeId::Bitget);
+        assert_eq!(trade.exchange, ExchangeId::BitgetSpot);
         assert_eq!(trade.symbol.base, "ETH");
         assert_eq!(trade.symbol.quote, "USDT");
         assert_eq!(trade.price, dec!(2000.50));
@@ -495,7 +495,7 @@ mod tests {
         .unwrap();
 
         let ticker = raw.into_ticker();
-        assert_eq!(ticker.exchange, ExchangeId::Bitget);
+        assert_eq!(ticker.exchange, ExchangeId::BitgetSpot);
         assert_eq!(ticker.symbol.base, "BTC");
         assert_eq!(ticker.symbol.quote, "USDT");
         assert_eq!(ticker.last_price, dec!(50000.00));
@@ -520,7 +520,7 @@ mod tests {
         ];
 
         let candle = parse_kline_row(&row, Symbol::new("BTC", "USDT")).unwrap();
-        assert_eq!(candle.exchange, ExchangeId::Bitget);
+        assert_eq!(candle.exchange, ExchangeId::BitgetSpot);
         assert_eq!(candle.symbol.base, "BTC");
         assert_eq!(candle.open, dec!(50000.00));
         assert_eq!(candle.high, dec!(50200.00));
@@ -574,7 +574,7 @@ mod tests {
         .unwrap();
 
         let ob = raw.into_orderbook(Symbol::new("BTC", "USDT"));
-        assert_eq!(ob.exchange, ExchangeId::Bitget);
+        assert_eq!(ob.exchange, ExchangeId::BitgetSpot);
         assert_eq!(ob.symbol.base, "BTC");
         assert_eq!(ob.symbol.quote, "USDT");
         assert_eq!(ob.bids.len(), 1);
@@ -649,7 +649,7 @@ mod tests {
         ];
 
         let info = symbols_to_exchange_info(symbols);
-        assert_eq!(info.exchange, ExchangeId::Bitget);
+        assert_eq!(info.exchange, ExchangeId::BitgetSpot);
         assert_eq!(info.symbols.len(), 2);
 
         let btc = &info.symbols[0];

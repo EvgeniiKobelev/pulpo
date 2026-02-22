@@ -1,4 +1,4 @@
-use crate::mapper::*;
+use crate::spot::mapper::*;
 use futures::{SinkExt, StreamExt};
 use gateway_core::*;
 use tokio::sync::mpsc;
@@ -24,7 +24,7 @@ async fn subscribe_and_stream(
     streams: Vec<String>,
 ) -> Result<BoxStream<serde_json::Value>> {
     let (ws_stream, _) = connect_async(url).await.map_err(|e| GatewayError::WebSocket {
-        exchange: ExchangeId::Binance,
+        exchange: ExchangeId::BinanceSpot,
         message: e.to_string(),
     })?;
 
@@ -41,7 +41,7 @@ async fn subscribe_and_stream(
             .send(Message::text(sub.to_string()))
             .await
             .map_err(|e| GatewayError::WebSocket {
-                exchange: ExchangeId::Binance,
+                exchange: ExchangeId::BinanceSpot,
                 message: e.to_string(),
             })?;
     }
