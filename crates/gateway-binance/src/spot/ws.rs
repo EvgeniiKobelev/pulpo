@@ -7,7 +7,6 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, warn};
 
 const WS_URL: &str = "wss://stream.binance.com:9443/ws";
-const COMBINED_WS_URL: &str = "wss://stream.binance.com:9443/stream";
 
 // ---------------------------------------------------------------------------
 // Core helper
@@ -137,7 +136,7 @@ pub async fn stream_candles(
 // ---------------------------------------------------------------------------
 
 /// Stream order-book depth updates for multiple symbols over a single
-/// combined WebSocket connection.
+/// WebSocket connection using SUBSCRIBE message.
 pub async fn stream_orderbooks_combined(
     _config: &ExchangeConfig,
     symbols: &[Symbol],
@@ -146,23 +145,22 @@ pub async fn stream_orderbooks_combined(
         .iter()
         .map(|s| format!("{}@depth@100ms", unified_to_binance(s).to_lowercase()))
         .collect();
-    let streams_path = streams.join("/");
-    let url = format!("{}?streams={}", COMBINED_WS_URL, streams_path);
 
-    // Combined-stream URLs carry the subscription in the query string, so we
-    // pass an empty vec (no explicit SUBSCRIBE message needed).
-    let raw = subscribe_and_stream(&url, vec![]).await?;
+    // Use SUBSCRIBE message instead of URL query params to avoid URL length limits.
+    let raw = subscribe_and_stream(WS_URL, streams).await?;
 
     Ok(Box::pin(raw.filter_map(|json| async move {
-        // Combined stream wraps data: {"stream":"...","data":{...}}
-        let data = json.get("data")?.clone();
-        let raw: BinanceWsDepthRaw = serde_json::from_value(data).ok()?;
+        // When subscribed to multiple streams, data comes wrapped:
+        // {"stream":"...","data":{...}} — but via SUBSCRIBE on /ws it arrives unwrapped.
+        // Handle both formats.
+        let depth_json = json.get("data").cloned().unwrap_or(json);
+        let raw: BinanceWsDepthRaw = serde_json::from_value(depth_json).ok()?;
         Some(raw.into_orderbook())
     })))
 }
 
-/// Stream real-time trades for multiple symbols over a single combined
-/// WebSocket connection.
+/// Stream real-time trades for multiple symbols over a single
+/// WebSocket connection using SUBSCRIBE message.
 pub async fn stream_trades_combined(
     _config: &ExchangeConfig,
     symbols: &[Symbol],
@@ -171,14 +169,13 @@ pub async fn stream_trades_combined(
         .iter()
         .map(|s| format!("{}@trade", unified_to_binance(s).to_lowercase()))
         .collect();
-    let streams_path = streams.join("/");
-    let url = format!("{}?streams={}", COMBINED_WS_URL, streams_path);
 
-    let raw = subscribe_and_stream(&url, vec![]).await?;
+    // Use SUBSCRIBE message instead of URL query params to avoid URL length limits.
+    let raw = subscribe_and_stream(WS_URL, streams).await?;
 
     Ok(Box::pin(raw.filter_map(|json| async move {
-        let data = json.get("data")?.clone();
-        let raw: BinanceWsTradeRaw = serde_json::from_value(data).ok()?;
+        let trade_json = json.get("data").cloned().unwrap_or(json);
+        let raw: BinanceWsTradeRaw = serde_json::from_value(trade_json).ok()?;
         Some(raw.into_trade())
     })))
 }

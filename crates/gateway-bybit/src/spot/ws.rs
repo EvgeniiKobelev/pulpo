@@ -28,15 +28,17 @@ async fn subscribe_and_stream(
 
     let (mut write, mut read) = ws_stream.split();
 
-    // Send SUBSCRIBE message.
-    let sub = serde_json::json!({"op": "subscribe", "args": topics});
-    write
-        .send(Message::text(sub.to_string()))
-        .await
-        .map_err(|e| GatewayError::WebSocket {
-            exchange: ExchangeId::BybitSpot,
-            message: e.to_string(),
-        })?;
+    // Bybit Spot limits subscribe requests to 10 args each.
+    for chunk in topics.chunks(10) {
+        let sub = serde_json::json!({"op": "subscribe", "args": chunk});
+        write
+            .send(Message::text(sub.to_string()))
+            .await
+            .map_err(|e| GatewayError::WebSocket {
+                exchange: ExchangeId::BybitSpot,
+                message: e.to_string(),
+            })?;
+    }
 
     let (tx, rx) = mpsc::channel::<serde_json::Value>(1024);
 
