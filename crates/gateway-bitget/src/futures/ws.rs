@@ -187,19 +187,20 @@ pub async fn stream_trades(
 ) -> Result<BoxStream<Trade>> {
     let inst_id = unified_to_bitget(symbol);
     let arg = sub_arg("trade", &inst_id);
+    let sym = symbol.clone();
     let raw_stream = subscribe_and_stream(vec![arg]).await?;
 
     Ok(Box::pin(
-        futures::stream::unfold(raw_stream, |mut stream| async move {
+        futures::stream::unfold((raw_stream, sym), |(mut stream, sym)| async move {
             loop {
                 let json = stream.next().await?;
                 let data = json.get("data")?;
-                let trades: Vec<BitgetMixWsTradeRaw> =
-                    serde_json::from_value(data.clone()).ok()?;
-                if !trades.is_empty() {
-                    let converted: Vec<Trade> =
-                        trades.into_iter().map(|t| t.into_trade()).collect();
-                    return Some((futures::stream::iter(converted), stream));
+                if let Ok(trades) = serde_json::from_value::<Vec<BitgetMixWsTradeRaw>>(data.clone()) {
+                    if !trades.is_empty() {
+                        let converted: Vec<Trade> =
+                            trades.into_iter().map(|t| t.into_trade(sym.clone())).collect();
+                        return Some((futures::stream::iter(converted), (stream, sym)));
+                    }
                 }
             }
         })
@@ -322,13 +323,16 @@ pub async fn stream_trades_batch(
         futures::stream::unfold(raw_stream, |mut stream| async move {
             loop {
                 let json = stream.next().await?;
+                let arg = json.get("arg")?;
+                let inst_id = arg.get("instId")?.as_str()?;
+                let symbol = bitget_symbol_to_unified(inst_id);
                 let data = json.get("data")?;
-                let trades: Vec<BitgetMixWsTradeRaw> =
-                    serde_json::from_value(data.clone()).ok()?;
-                if !trades.is_empty() {
-                    let converted: Vec<Trade> =
-                        trades.into_iter().map(|t| t.into_trade()).collect();
-                    return Some((futures::stream::iter(converted), stream));
+                if let Ok(trades) = serde_json::from_value::<Vec<BitgetMixWsTradeRaw>>(data.clone()) {
+                    if !trades.is_empty() {
+                        let converted: Vec<Trade> =
+                            trades.into_iter().map(|t| t.into_trade(symbol.clone())).collect();
+                        return Some((futures::stream::iter(converted), stream));
+                    }
                 }
             }
         })

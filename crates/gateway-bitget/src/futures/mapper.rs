@@ -265,13 +265,10 @@ pub struct BitgetMixWsTradeRaw {
     pub price: String,
     pub size: String,
     pub ts: String,
-    #[serde(rename = "instId")]
-    pub inst_id: String,
 }
 
 impl BitgetMixWsTradeRaw {
-    pub fn into_trade(self) -> Trade {
-        let symbol = bitget_symbol_to_unified(&self.inst_id);
+    pub fn into_trade(self, symbol: Symbol) -> Trade {
         let side = match self.side.as_str() {
             "buy" | "Buy" => Side::Buy,
             _ => Side::Sell,
@@ -636,7 +633,6 @@ mod tests {
         let raw: BitgetMixWsTradeRaw = serde_json::from_str(
             r#"{
                 "tradeId": "trade-999",
-                "instId": "ETHUSDT",
                 "price": "2000.00",
                 "size": "0.5",
                 "side": "sell",
@@ -645,7 +641,7 @@ mod tests {
         )
         .unwrap();
 
-        let trade = raw.into_trade();
+        let trade = raw.into_trade(Symbol::new("ETH", "USDT"));
         assert_eq!(trade.exchange, ExchangeId::BitgetFutures);
         assert_eq!(trade.symbol.base, "ETH");
         assert_eq!(trade.symbol.quote, "USDT");
