@@ -7,6 +7,8 @@ pub struct WsConfig {
     pub ping_interval: Duration,
     pub pong_timeout: Duration,
     pub orderbook_resync_on_gap: bool,
+    /// Optional HTTP CONNECT proxy. Format: `host:port:user:pass` or `host:port`.
+    pub proxy: Option<String>,
 }
 
 impl Default for WsConfig {
@@ -17,6 +19,7 @@ impl Default for WsConfig {
             ping_interval: Duration::from_secs(15),
             pong_timeout: Duration::from_secs(10),
             orderbook_resync_on_gap: true,
+            proxy: None,
         }
     }
 }
