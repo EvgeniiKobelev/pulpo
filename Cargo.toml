@@ -8,5 +8,6 @@ members = [
     "crates/gateway-okx",
     "crates/gateway-gate",
     "crates/gateway-mexc",
+    "crates/gateway-kucoin",
     "crates/gateway-manager",
 ]
