@@ -9,6 +9,26 @@ use tracing::{debug, info, warn};
 
 const WS_URL: &str = "wss://mainnet.zklighter.elliot.ai/stream?readonly=true";
 
+/// Build a WebSocket connect request with browser-like headers.
+/// Some CDNs / reverse-proxies reject bare tungstenite handshakes that
+/// lack `User-Agent` or `Origin`.
+fn ws_request() -> tokio_tungstenite::tungstenite::http::Request<()> {
+    tokio_tungstenite::tungstenite::http::Request::builder()
+        .uri(WS_URL)
+        .header("Host", "mainnet.zklighter.elliot.ai")
+        .header("Origin", "https://mainnet.zklighter.elliot.ai")
+        .header("User-Agent", "pulpo-loco/0.1")
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header(
+            "Sec-WebSocket-Key",
+            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+        )
+        .body(())
+        .expect("valid WS request")
+}
+
 /// Maximum number of channel subscriptions per WebSocket connection.
 /// Lighter allows 100 per connection; we use 50 to stay safely within limits.
 const CHUNK_SIZE: usize = 50;
@@ -31,7 +51,7 @@ async fn subscribe_and_stream(
     channels: Vec<String>,
 ) -> Result<BoxStream<serde_json::Value>> {
     let (ws_stream, _) =
-        connect_async(WS_URL)
+        connect_async(ws_request())
             .await
             .map_err(|e| GatewayError::WebSocket {
                 exchange: ExchangeId::LighterFutures,
@@ -117,7 +137,7 @@ async fn subscribe_and_stream(
                 }
                 warn!("Lighter WS reconnecting in {backoff:?}…");
                 tokio::time::sleep(backoff).await;
-                match connect_async(WS_URL).await {
+                match connect_async(ws_request()).await {
                     Ok((ws, _)) => {
                         let (mut new_write, new_read) = ws.split();
                         // Resubscribe to all channels.
