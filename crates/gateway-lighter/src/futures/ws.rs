@@ -2,21 +2,31 @@ use crate::futures::mapper::*;
 use futures::{stream::SelectAll, SinkExt, StreamExt};
 use gateway_core::*;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 
 const WS_URL: &str = "wss://mainnet.zklighter.elliot.ai/stream?readonly=true";
+const WS_HOST: &str = "mainnet.zklighter.elliot.ai";
+const WS_PORT: u16 = 443;
 
-/// Build a WebSocket connect request with browser-like headers.
-/// Some CDNs / reverse-proxies reject bare tungstenite handshakes that
-/// lack `User-Agent` or `Origin`.
+/// Maximum number of channel subscriptions per WebSocket connection.
+/// Lighter allows 100 per connection; we use 50 to stay safely within limits.
+const CHUNK_SIZE: usize = 50;
+
+// ---------------------------------------------------------------------------
+// Connection helpers (proxy-aware)
+// ---------------------------------------------------------------------------
+
+/// Build a WebSocket upgrade request with browser-like headers.
 fn ws_request() -> tokio_tungstenite::tungstenite::http::Request<()> {
     tokio_tungstenite::tungstenite::http::Request::builder()
         .uri(WS_URL)
-        .header("Host", "mainnet.zklighter.elliot.ai")
-        .header("Origin", "https://mainnet.zklighter.elliot.ai")
+        .header("Host", WS_HOST)
+        .header("Origin", format!("https://{WS_HOST}"))
         .header("User-Agent", "pulpo-loco/0.1")
         .header("Connection", "Upgrade")
         .header("Upgrade", "websocket")
@@ -29,9 +39,162 @@ fn ws_request() -> tokio_tungstenite::tungstenite::http::Request<()> {
         .expect("valid WS request")
 }
 
-/// Maximum number of channel subscriptions per WebSocket connection.
-/// Lighter allows 100 per connection; we use 50 to stay safely within limits.
-const CHUNK_SIZE: usize = 50;
+/// Minimal Base64 encoder for proxy auth (avoids extra dependency).
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(CHARS[((n >> 18) & 63) as usize] as char);
+        out.push(CHARS[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 { CHARS[((n >> 6) & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { CHARS[(n & 63) as usize] as char } else { '=' });
+    }
+    out
+}
+
+/// Read proxy URL from environment: `LIGHTER_WS_PROXY` or `HTTPS_PROXY`.
+///
+/// Supported formats:
+/// - `http://user:pass@host:port`
+/// - `http://host:port`
+/// - `host:port`
+fn proxy_url() -> Option<String> {
+    std::env::var("LIGHTER_WS_PROXY")
+        .or_else(|_| std::env::var("HTTPS_PROXY"))
+        .or_else(|_| std::env::var("https_proxy"))
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// Parse `http://user:pass@host:port` into `(host:port, Some(user:pass))`.
+fn parse_proxy(raw: &str) -> (&str, Option<&str>) {
+    let stripped = raw
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .trim_end_matches('/');
+    if let Some(at) = stripped.find('@') {
+        (&stripped[at + 1..], Some(&stripped[..at]))
+    } else {
+        (stripped, None)
+    }
+}
+
+/// Establish a TCP connection — directly or via HTTP CONNECT proxy.
+async fn tcp_connect() -> Result<TcpStream> {
+    if let Some(proxy) = proxy_url() {
+        let (addr, auth) = parse_proxy(&proxy);
+
+        debug!("Lighter WS: connecting via proxy {addr}");
+
+        let mut stream =
+            TcpStream::connect(addr)
+                .await
+                .map_err(|e| GatewayError::WebSocket {
+                    exchange: ExchangeId::LighterFutures,
+                    message: format!("proxy TCP connect failed: {e}"),
+                })?;
+
+        // HTTP CONNECT tunnel
+        let mut req = format!(
+            "CONNECT {WS_HOST}:{WS_PORT} HTTP/1.1\r\nHost: {WS_HOST}:{WS_PORT}\r\n"
+        );
+        if let Some(credentials) = auth {
+            let encoded = base64_encode(credentials.as_bytes());
+            req.push_str(&format!("Proxy-Authorization: Basic {encoded}\r\n"));
+        }
+        req.push_str("\r\n");
+
+        stream
+            .write_all(req.as_bytes())
+            .await
+            .map_err(|e| GatewayError::WebSocket {
+                exchange: ExchangeId::LighterFutures,
+                message: format!("proxy write: {e}"),
+            })?;
+
+        // Read the HTTP response byte-by-byte to avoid over-reading into TLS data.
+        let mut response = Vec::with_capacity(256);
+        let mut byte = [0u8; 1];
+        loop {
+            stream
+                .read_exact(&mut byte)
+                .await
+                .map_err(|e| GatewayError::WebSocket {
+                    exchange: ExchangeId::LighterFutures,
+                    message: format!("proxy read: {e}"),
+                })?;
+            response.push(byte[0]);
+            if response.ends_with(b"\r\n\r\n") {
+                break;
+            }
+            if response.len() > 4096 {
+                return Err(GatewayError::WebSocket {
+                    exchange: ExchangeId::LighterFutures,
+                    message: "proxy response too large".into(),
+                });
+            }
+        }
+
+        let resp = String::from_utf8_lossy(&response);
+        if !resp.contains("200") {
+            return Err(GatewayError::WebSocket {
+                exchange: ExchangeId::LighterFutures,
+                message: format!(
+                    "proxy CONNECT rejected: {}",
+                    resp.lines().next().unwrap_or("unknown")
+                ),
+            });
+        }
+
+        Ok(stream)
+    } else {
+        TcpStream::connect((WS_HOST, WS_PORT))
+            .await
+            .map_err(|e| GatewayError::WebSocket {
+                exchange: ExchangeId::LighterFutures,
+                message: format!("TCP connect: {e}"),
+            })
+    }
+}
+
+/// Full WebSocket connect: TCP (± proxy) → TLS → WS handshake.
+async fn ws_connect(
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_native_tls::TlsStream<TcpStream>>,
+> {
+    let tcp = tcp_connect().await?;
+
+    let tls_cx = native_tls::TlsConnector::new().map_err(|e| {
+        GatewayError::WebSocket {
+            exchange: ExchangeId::LighterFutures,
+            message: format!("TLS init: {e}"),
+        }
+    })?;
+    let tls_cx = tokio_native_tls::TlsConnector::from(tls_cx);
+
+    let tls_stream =
+        tls_cx
+            .connect(WS_HOST, tcp)
+            .await
+            .map_err(|e| GatewayError::WebSocket {
+                exchange: ExchangeId::LighterFutures,
+                message: format!("TLS handshake: {e}"),
+            })?;
+
+    let (ws, _) = tokio_tungstenite::client_async(ws_request(), tls_stream)
+        .await
+        .map_err(|e| GatewayError::WebSocket {
+            exchange: ExchangeId::LighterFutures,
+            message: e.to_string(),
+        })?;
+
+    Ok(ws)
+}
 
 // ---------------------------------------------------------------------------
 // Core helper
@@ -50,15 +213,8 @@ const CHUNK_SIZE: usize = 50;
 async fn subscribe_and_stream(
     channels: Vec<String>,
 ) -> Result<BoxStream<serde_json::Value>> {
-    let (ws_stream, _) =
-        connect_async(ws_request())
-            .await
-            .map_err(|e| GatewayError::WebSocket {
-                exchange: ExchangeId::LighterFutures,
-                message: e.to_string(),
-            })?;
-
-    let (mut write, read) = ws_stream.split();
+    let ws = ws_connect().await?;
+    let (mut write, read) = ws.split();
 
     // Send subscribe for each channel.
     for channel in &channels {
@@ -137,8 +293,8 @@ async fn subscribe_and_stream(
                 }
                 warn!("Lighter WS reconnecting in {backoff:?}…");
                 tokio::time::sleep(backoff).await;
-                match connect_async(ws_request()).await {
-                    Ok((ws, _)) => {
+                match ws_connect().await {
+                    Ok(ws) => {
                         let (mut new_write, new_read) = ws.split();
                         // Resubscribe to all channels.
                         let mut ok = true;
