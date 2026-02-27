@@ -247,6 +247,9 @@ pub async fn stream_liquidations(
 
 /// Stream order-book depth updates for multiple symbols over a single
 /// combined WebSocket connection.
+///
+/// Uses the `/stream` endpoint with SUBSCRIBE method instead of URL query
+/// params to avoid URL-length issues with many symbols.
 pub async fn stream_orderbooks_combined(
     _config: &ExchangeConfig,
     symbols: &[Symbol],
@@ -255,12 +258,8 @@ pub async fn stream_orderbooks_combined(
         .iter()
         .map(|s| format!("{}@depth@100ms", unified_to_binance(s).to_lowercase()))
         .collect();
-    let streams_path = streams.join("/");
-    let url = format!("{}?streams={}", COMBINED_WS_URL, streams_path);
 
-    // Combined-stream URLs carry the subscription in the query string, so we
-    // pass an empty vec (no explicit SUBSCRIBE message needed).
-    let raw = subscribe_and_stream(&url, vec![]).await?;
+    let raw = subscribe_and_stream(COMBINED_WS_URL, streams).await?;
 
     Ok(Box::pin(raw.filter_map(|json| async move {
         // Combined stream wraps data: {"stream":"...","data":{...}}
@@ -272,6 +271,9 @@ pub async fn stream_orderbooks_combined(
 
 /// Stream real-time trades for multiple symbols over a single combined
 /// WebSocket connection.
+///
+/// Uses the `/stream` endpoint with SUBSCRIBE method instead of URL query
+/// params to avoid URL-length issues with many symbols.
 pub async fn stream_trades_combined(
     _config: &ExchangeConfig,
     symbols: &[Symbol],
@@ -280,10 +282,8 @@ pub async fn stream_trades_combined(
         .iter()
         .map(|s| format!("{}@trade", unified_to_binance(s).to_lowercase()))
         .collect();
-    let streams_path = streams.join("/");
-    let url = format!("{}?streams={}", COMBINED_WS_URL, streams_path);
 
-    let raw = subscribe_and_stream(&url, vec![]).await?;
+    let raw = subscribe_and_stream(COMBINED_WS_URL, streams).await?;
 
     Ok(Box::pin(raw.filter_map(|json| async move {
         let data = json.get("data")?.clone();
