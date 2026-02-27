@@ -17,6 +17,7 @@ pub enum ExchangeId {
     Hyperliquid,
     Kucoin,
     Mexc,
+    LighterFutures,
 }
 
 impl fmt::Display for ExchangeId {
@@ -34,6 +35,7 @@ impl fmt::Display for ExchangeId {
             Self::Hyperliquid => write!(f, "hyperliquid"),
             Self::Kucoin => write!(f, "kucoin"),
             Self::Mexc => write!(f, "mexc"),
+            Self::LighterFutures => write!(f, "lighter_futures"),
         }
     }
 }
