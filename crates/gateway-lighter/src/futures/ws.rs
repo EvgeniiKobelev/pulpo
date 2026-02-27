@@ -234,55 +234,64 @@ async fn subscribe_and_stream(
         let mut write = write;
         let mut read = read;
         let mut backoff = Duration::from_secs(1);
+        let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+        ping_interval.tick().await; // skip first immediate tick
 
         'outer: loop {
-            // ---- message read loop ----
+            // ---- message read loop with periodic ping ----
             loop {
-                match read.next().await {
-                    Some(Ok(Message::Text(text))) => {
-                        if let Ok(json) =
-                            serde_json::from_str::<serde_json::Value>(&text)
-                        {
-                            // Skip subscription confirmations.
-                            if json.get("type").and_then(|v| v.as_str())
-                                == Some("subscribed")
-                            {
-                                continue;
+                tokio::select! {
+                    msg = read.next() => {
+                        match msg {
+                            Some(Ok(Message::Text(text))) => {
+                                if let Ok(json) =
+                                    serde_json::from_str::<serde_json::Value>(&text)
+                                {
+                                    if json.get("type").and_then(|v| v.as_str())
+                                        == Some("subscribed")
+                                    {
+                                        continue;
+                                    }
+                                    if json.get("type").and_then(|v| v.as_str())
+                                        == Some("error")
+                                    {
+                                        warn!(
+                                            "Lighter WS error: {}",
+                                            json.get("message")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("unknown")
+                                        );
+                                        continue;
+                                    }
+                                    if tx.send(json).await.is_err() {
+                                        break 'outer;
+                                    }
+                                }
                             }
-                            // Skip error messages (log them).
-                            if json.get("type").and_then(|v| v.as_str())
-                                == Some("error")
-                            {
-                                warn!(
-                                    "Lighter WS error: {}",
-                                    json.get("message")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("unknown")
-                                );
-                                continue;
+                            Some(Ok(Message::Ping(data))) => {
+                                let _ = write.send(Message::Pong(data)).await;
                             }
-                            // Forward update messages.
-                            if tx.send(json).await.is_err() {
-                                break 'outer;
+                            Some(Ok(Message::Close(_))) => {
+                                warn!("Lighter WS connection closed");
+                                break;
                             }
+                            Some(Err(e)) => {
+                                warn!("Lighter WS error: {}", e);
+                                break;
+                            }
+                            None => {
+                                warn!("Lighter WS stream ended unexpectedly");
+                                break;
+                            }
+                            _ => {}
                         }
                     }
-                    Some(Ok(Message::Ping(data))) => {
-                        let _ = write.send(Message::Pong(data)).await;
+                    _ = ping_interval.tick() => {
+                        if write.send(Message::Ping(vec![].into())).await.is_err() {
+                            warn!("Lighter WS ping send failed");
+                            break;
+                        }
                     }
-                    Some(Ok(Message::Close(_))) => {
-                        warn!("Lighter WS connection closed");
-                        break;
-                    }
-                    Some(Err(e)) => {
-                        warn!("Lighter WS error: {}", e);
-                        break;
-                    }
-                    None => {
-                        warn!("Lighter WS stream ended unexpectedly");
-                        break;
-                    }
-                    _ => {}
                 }
             }
 
@@ -296,7 +305,6 @@ async fn subscribe_and_stream(
                 match ws_connect().await {
                     Ok(ws) => {
                         let (mut new_write, new_read) = ws.split();
-                        // Resubscribe to all channels.
                         let mut ok = true;
                         for channel in &channels {
                             let sub = serde_json::json!({
@@ -320,6 +328,7 @@ async fn subscribe_and_stream(
                         write = new_write;
                         read = new_read;
                         backoff = Duration::from_secs(1);
+                        ping_interval.reset();
                         info!("Lighter WS reconnected");
                         break;
                     }
