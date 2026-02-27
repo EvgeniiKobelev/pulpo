@@ -247,14 +247,17 @@ async fn subscribe_and_stream(
                                 if let Ok(json) =
                                     serde_json::from_str::<serde_json::Value>(&text)
                                 {
-                                    if json.get("type").and_then(|v| v.as_str())
-                                        == Some("subscribed")
-                                    {
+                                    let msg_type = json.get("type").and_then(|v| v.as_str());
+                                    // Respond to JSON-level ping with pong.
+                                    if msg_type == Some("ping") {
+                                        let pong = r#"{"type":"pong"}"#;
+                                        let _ = write.send(Message::text(pong)).await;
                                         continue;
                                     }
-                                    if json.get("type").and_then(|v| v.as_str())
-                                        == Some("error")
-                                    {
+                                    if msg_type == Some("subscribed") {
+                                        continue;
+                                    }
+                                    if msg_type == Some("error") {
                                         warn!(
                                             "Lighter WS error: {}",
                                             json.get("message")
