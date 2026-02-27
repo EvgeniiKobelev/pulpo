@@ -54,39 +54,55 @@ async fn subscribe_and_stream(
     let (tx, rx) = mpsc::channel::<serde_json::Value>(1024);
 
     tokio::spawn(async move {
-        // Keep `write` alive so the connection is not half-closed.
-        let mut _write = write;
+        let mut write = write;
         let mut read = read;
         let mut backoff = Duration::from_secs(1);
+        let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+        ping_interval.tick().await; // skip first immediate tick
 
         'outer: loop {
-            // ---- message read loop ----
+            // ---- message read loop with periodic ping ----
             loop {
-                match read.next().await {
-                    Some(Ok(Message::Text(text))) => {
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                            // Skip subscription confirmation responses like {"result":null,"id":1}
-                            if json.get("result").is_some() && json.get("id").is_some() {
-                                continue;
+                tokio::select! {
+                    msg = read.next() => {
+                        match msg {
+                            Some(Ok(Message::Text(text))) => {
+                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                                    if json.get("result").is_some() && json.get("id").is_some() {
+                                        continue;
+                                    }
+                                    if tx.send(json).await.is_err() {
+                                        break 'outer;
+                                    }
+                                }
                             }
-                            if tx.send(json).await.is_err() {
-                                break 'outer;
+                            Some(Ok(Message::Ping(data))) => {
+                                if write.send(Message::Pong(data)).await.is_err() {
+                                    warn!("Binance WS pong send failed");
+                                    break;
+                                }
                             }
+                            Some(Ok(Message::Close(_))) => {
+                                warn!("Binance WS connection closed");
+                                break;
+                            }
+                            Some(Err(e)) => {
+                                warn!("Binance WS error: {}", e);
+                                break;
+                            }
+                            None => {
+                                warn!("Binance WS stream ended unexpectedly");
+                                break;
+                            }
+                            _ => {}
                         }
                     }
-                    Some(Ok(Message::Close(_))) => {
-                        warn!("Binance WS connection closed");
-                        break;
+                    _ = ping_interval.tick() => {
+                        if write.send(Message::Ping(vec![].into())).await.is_err() {
+                            warn!("Binance WS ping send failed");
+                            break;
+                        }
                     }
-                    Some(Err(e)) => {
-                        warn!("Binance WS error: {}", e);
-                        break;
-                    }
-                    None => {
-                        warn!("Binance WS stream ended unexpectedly");
-                        break;
-                    }
-                    _ => {}
                 }
             }
 
@@ -116,9 +132,10 @@ async fn subscribe_and_stream(
                                 continue;
                             }
                         }
-                        _write = new_write;
+                        write = new_write;
                         read = new_read;
                         backoff = Duration::from_secs(1);
+                        ping_interval.reset();
                         info!("Binance WS reconnected");
                         break;
                     }
