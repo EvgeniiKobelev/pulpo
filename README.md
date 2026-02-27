@@ -14,28 +14,28 @@ One trait. Multiple exchanges. Spot & Futures. Real-time WebSocket streams.
 ---
 
 Pulpo Loco provides a unified `Exchange` trait that abstracts away the differences between crypto exchange APIs.
-Write your trading logic once — run it on Binance, Bitget, Bybit, OKX, Gate.io, MEXC, KuCoin, and more.
+Write your trading logic once — run it on Binance, Bitget, Bybit, OKX, Gate.io, MEXC, KuCoin, Lighter, and more.
 
 </div>
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                        gateway-manager                                            │
-│             GatewayManager: register / register_futures / query / merge                            │
-└──┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────────────────────────┘
-   │          │          │          │          │          │          │
-┌──▼───────┐┌─▼────────┐┌▼────────┐┌▼────────┐┌▼────────┐┌▼───────┐┌▼────────┐
-│ binance  ││ bitget   ││ bybit   ││ okx     ││ gate    ││ mexc   ││ kucoin  │
-│ spot+fut ││ spot+fut ││ spot+fut ││ spot+fut ││ spot+fut││ spot   ││ spot    │
-│ REST+WS  ││ REST+WS  ││ REST+WS  ││ REST+WS  ││ REST+WS ││ REST+WS││ REST+WS │
-└──┬───────┘└─┬────────┘└┬────────┘└┬────────┘└┬────────┘└┬───────┘└┬────────┘
-   │          │          │          │          │          │          │
-┌──▼──────────▼──────────▼──────────▼──────────▼──────────▼──────────▼──────────┐
-│                                   gateway-core                                 │
-│         Exchange + FuturesExchange traits, types, errors, config               │
-└──────────────────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                             gateway-manager                                                    │
+│                  GatewayManager: register / register_futures / query / merge                                    │
+└──┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬────────────────────────────────┘
+   │          │          │          │          │          │          │          │
+┌──▼───────┐┌─▼────────┐┌▼────────┐┌▼────────┐┌▼────────┐┌▼───────┐┌▼────────┐┌▼─────────┐
+│ binance  ││ bitget   ││ bybit   ││ okx     ││ gate    ││ mexc   ││ kucoin  ││ lighter  │
+│ spot+fut ││ spot+fut ││ spot+fut ││ spot+fut ││ spot+fut││ spot   ││ spot    ││ futures  │
+│ REST+WS  ││ REST+WS  ││ REST+WS  ││ REST+WS  ││ REST+WS ││ REST+WS││ REST+WS ││ REST+WS  │
+└──┬───────┘└─┬────────┘└┬────────┘└┬────────┘└┬────────┘└┬───────┘└┬────────┘└┬─────────┘
+   │          │          │          │          │          │          │          │
+┌──▼──────────▼──────────▼──────────▼──────────▼──────────▼──────────▼──────────▼──────────┐
+│                                      gateway-core                                         │
+│            Exchange + FuturesExchange traits, types, errors, config                       │
+└───────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 | Crate | Description |
@@ -48,6 +48,7 @@ Write your trading logic once — run it on Binance, Bitget, Bybit, OKX, Gate.io
 | `gateway-gate` | Gate.io Spot & Futures — REST + WebSocket |
 | `gateway-mexc` | MEXC Spot — REST + WebSocket (protobuf) |
 | `gateway-kucoin` | KuCoin Spot — REST + WebSocket |
+| `gateway-lighter` | Lighter DEX Futures — REST + WebSocket |
 | `gateway-manager` | Multi-exchange orchestrator — parallel queries, merged streams, futures aggregation |
 
 ## Quick Start
@@ -179,6 +180,7 @@ cargo run -p gateway-bitget  --example futures_rest
 cargo run -p gateway-bybit   --example futures_rest
 cargo run -p gateway-okx     --example futures_rest
 cargo run -p gateway-gate    --example futures_rest
+cargo run -p gateway-lighter --example futures_rest
 ```
 
 ### WebSocket Streams (Spot)
@@ -200,8 +202,11 @@ cargo run -p gateway-kucoin  --example stream_trades
 Futures orderbook, trades, candles, mark price, liquidations:
 
 ```bash
-cargo run -p gateway-bitget --example stream_futures
-cargo run -p gateway-gate   --example stream_futures
+cargo run -p gateway-bitget  --example stream_futures
+cargo run -p gateway-gate    --example stream_futures
+cargo run -p gateway-lighter --example stream_trades
+cargo run -p gateway-lighter --example stream_orderbook
+cargo run -p gateway-lighter --example stream_mark_price
 ```
 
 ### Multi-exchange
@@ -223,6 +228,7 @@ cargo run -p gateway-manager --example multi_exchange
 | Gate.io | yes | yes | yes | yes | yes (multi-topic) |
 | MEXC | yes | — | yes | yes | yes (multi-topic) |
 | KuCoin | yes | — | yes | yes | yes (multi-topic) |
+| Lighter | — | yes | yes | yes | yes (chunked) |
 
 ## Project Structure
 
@@ -301,6 +307,15 @@ pulpo_loco/
     │   └── examples/
     │       ├── stream_trades.rs
     │       └── ws_debug.rs
+    ├── gateway-lighter/                # Lighter DEX (Futures only)
+    │   ├── src/
+    │   │   ├── lib.rs                  # LighterFutures
+    │   │   └── futures/                # Futures: mod.rs, rest.rs, ws.rs, mapper.rs
+    │   └── examples/
+    │       ├── futures_rest.rs
+    │       ├── stream_trades.rs
+    │       ├── stream_orderbook.rs
+    │       └── stream_mark_price.rs
     └── gateway-manager/                # Multi-exchange orchestrator
         ├── src/
         │   └── lib.rs                  # GatewayManager
