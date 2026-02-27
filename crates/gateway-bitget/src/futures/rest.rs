@@ -174,14 +174,12 @@ impl BitgetFuturesRest {
             "{}/api/v2/mix/market/open-interest?productType=USDT-FUTURES&symbol={}",
             self.base_url, raw
         );
-        let result: Vec<BitgetOpenInterestRaw> = self.fetch(&url).await?;
-        result
-            .into_iter()
-            .next()
-            .map(|r| r.into_open_interest())
-            .ok_or_else(|| GatewayError::SymbolNotFound {
+        let result: BitgetOpenInterestData = self.fetch(&url).await?;
+        result.into_open_interest().ok_or_else(|| {
+            GatewayError::SymbolNotFound {
                 exchange: ExchangeId::BitgetFutures,
                 symbol: symbol.to_string(),
-            })
+            }
+        })
     }
 }

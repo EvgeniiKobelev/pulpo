@@ -20,10 +20,11 @@ pub struct BitgetMixContractRaw {
     pub base_coin: String,
     #[serde(rename = "quoteCoin")]
     pub quote_coin: String,
-    #[serde(rename = "pricePrecision")]
+    #[serde(rename = "pricePlace")]
     pub price_precision: String,
-    #[serde(rename = "quantityPrecision")]
+    #[serde(rename = "volumePlace")]
     pub quantity_precision: String,
+    #[serde(rename = "symbolStatus")]
     pub status: String,
     #[serde(rename = "minTradeUSDT")]
     pub min_trade_usdt: String,
@@ -63,8 +64,8 @@ pub fn contracts_to_exchange_info(contracts: Vec<BitgetMixContractRaw>) -> Excha
 
 #[derive(Debug, Deserialize)]
 pub struct BitgetMixOrderBookData {
-    pub asks: Vec<[String; 2]>,
-    pub bids: Vec<[String; 2]>,
+    pub asks: Vec<[serde_json::Value; 2]>,
+    pub bids: Vec<[serde_json::Value; 2]>,
     pub ts: String,
 }
 
@@ -140,7 +141,7 @@ pub struct BitgetMixTickerRaw {
     pub mark_price: String,
     #[serde(rename = "indexPrice")]
     pub index_price: String,
-    #[serde(rename = "openInterest")]
+    #[serde(rename = "holdingAmount")]
     pub open_interest: String,
 }
 
@@ -199,25 +200,33 @@ impl BitgetFundingRateRaw {
 // Open Interest (GET /api/v2/mix/market/open-interest)
 // ---------------------------------------------------------------------------
 
+/// Wrapper for the open-interest endpoint which nests the list inside an
+/// `openInterestList` field alongside a top-level `ts`.
 #[derive(Debug, Deserialize)]
-pub struct BitgetOpenInterestRaw {
-    pub symbol: String,
-    #[serde(rename = "openInterest")]
-    pub open_interest: String,
+pub struct BitgetOpenInterestData {
+    #[serde(rename = "openInterestList")]
+    pub list: Vec<BitgetOpenInterestEntry>,
     pub ts: String,
 }
 
-impl BitgetOpenInterestRaw {
-    pub fn into_open_interest(self) -> OpenInterest {
-        let symbol = bitget_symbol_to_unified(&self.symbol);
-        let oi = Decimal::from_str(&self.open_interest).unwrap_or_default();
-        OpenInterest {
+#[derive(Debug, Deserialize)]
+pub struct BitgetOpenInterestEntry {
+    pub symbol: String,
+    pub size: String,
+}
+
+impl BitgetOpenInterestData {
+    pub fn into_open_interest(self) -> Option<OpenInterest> {
+        let entry = self.list.into_iter().next()?;
+        let symbol = bitget_symbol_to_unified(&entry.symbol);
+        let oi = Decimal::from_str(&entry.size).unwrap_or_default();
+        Some(OpenInterest {
             exchange: ExchangeId::BitgetFutures,
             symbol,
             open_interest: oi,
             open_interest_value: Decimal::ZERO,
             timestamp_ms: self.ts.parse::<u64>().unwrap_or(0),
-        }
+        })
     }
 }
 
@@ -287,23 +296,22 @@ impl BitgetMixWsTradeRaw {
 
 #[derive(Debug, Deserialize)]
 pub struct BitgetMixWsOrderBook {
-    pub asks: Vec<[String; 2]>,
-    pub bids: Vec<[String; 2]>,
+    pub asks: Vec<[serde_json::Value; 2]>,
+    pub bids: Vec<[serde_json::Value; 2]>,
     pub ts: String,
     #[serde(default)]
-    pub seq: Option<String>,
+    pub seq: Option<u64>,
 }
 
 impl BitgetMixWsOrderBook {
     pub fn into_orderbook(self, symbol: Symbol) -> OrderBook {
-        let seq = self.seq.as_deref().and_then(|s| s.parse::<u64>().ok());
         OrderBook {
             exchange: ExchangeId::BitgetFutures,
             symbol,
             bids: parse_levels(&self.bids),
             asks: parse_levels(&self.asks),
             timestamp_ms: self.ts.parse::<u64>().unwrap_or(0),
-            sequence: seq,
+            sequence: self.seq,
         }
     }
 }
@@ -378,11 +386,20 @@ impl BitgetMixWsLiquidationRaw {
 // Helper functions
 // ---------------------------------------------------------------------------
 
-fn parse_levels(raw: &[[String; 2]]) -> Vec<Level> {
+/// Convert a JSON value (string or number) to its string representation.
+fn json_value_to_str(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn parse_levels(raw: &[[serde_json::Value; 2]]) -> Vec<Level> {
     raw.iter()
         .filter_map(|pair| {
-            let price = Decimal::from_str(&pair[0]).ok()?;
-            let qty = Decimal::from_str(&pair[1]).ok()?;
+            let price = Decimal::from_str(&json_value_to_str(&pair[0])?).ok()?;
+            let qty = Decimal::from_str(&json_value_to_str(&pair[1])?).ok()?;
             Some(Level::new(price, qty))
         })
         .collect()
@@ -406,7 +423,7 @@ mod tests {
                 quote_coin: "USDT".to_string(),
                 price_precision: "2".to_string(),
                 quantity_precision: "6".to_string(),
-                status: "online".to_string(),
+                status: "normal".to_string(),
                 min_trade_usdt: "5".to_string(),
             },
             BitgetMixContractRaw {
@@ -516,7 +533,7 @@ mod tests {
                 "fundingRate": "0.0001",
                 "markPrice": "50000.50",
                 "indexPrice": "49999.80",
-                "openInterest": "1000.5"
+                "holdingAmount": "1000.5"
             }"#,
         )
         .unwrap();
@@ -547,7 +564,7 @@ mod tests {
                 "fundingRate": "0.0001",
                 "markPrice": "50000.50",
                 "indexPrice": "49999.80",
-                "openInterest": "1000.5"
+                "holdingAmount": "1000.5"
             }"#,
         )
         .unwrap();
@@ -580,16 +597,17 @@ mod tests {
 
     #[test]
     fn test_open_interest_conversion() {
-        let raw: BitgetOpenInterestRaw = serde_json::from_str(
+        let raw: BitgetOpenInterestData = serde_json::from_str(
             r#"{
-                "symbol": "ETHUSDT",
-                "openInterest": "50000.25",
+                "openInterestList": [
+                    {"symbol": "ETHUSDT", "size": "50000.25"}
+                ],
                 "ts": "1700000000000"
             }"#,
         )
         .unwrap();
 
-        let oi = raw.into_open_interest();
+        let oi = raw.into_open_interest().unwrap();
         assert_eq!(oi.exchange, ExchangeId::BitgetFutures);
         assert_eq!(oi.symbol.base, "ETH");
         assert_eq!(oi.symbol.quote, "USDT");
@@ -659,7 +677,8 @@ mod tests {
                 "asks": [["50001.00", "2.0"]],
                 "bids": [["50000.00", "1.0"]],
                 "ts": "1700000000000",
-                "seq": "100"
+                "checksum": 0,
+                "seq": 100
             }"#,
         )
         .unwrap();
@@ -751,8 +770,8 @@ mod tests {
     #[test]
     fn test_parse_levels() {
         let raw = vec![
-            ["100.50".to_string(), "1.5".to_string()],
-            ["99.00".to_string(), "2.0".to_string()],
+            [serde_json::json!("100.50"), serde_json::json!("1.5")],
+            [serde_json::json!(99.00), serde_json::json!(2.0)],
         ];
         let levels = parse_levels(&raw);
         assert_eq!(levels.len(), 2);
@@ -765,8 +784,8 @@ mod tests {
     #[test]
     fn test_parse_levels_skips_invalid() {
         let raw = vec![
-            ["bad".to_string(), "1.0".to_string()],
-            ["50.00".to_string(), "3.0".to_string()],
+            [serde_json::json!("bad"), serde_json::json!("1.0")],
+            [serde_json::json!("50.00"), serde_json::json!("3.0")],
         ];
         let levels = parse_levels(&raw);
         assert_eq!(levels.len(), 1);

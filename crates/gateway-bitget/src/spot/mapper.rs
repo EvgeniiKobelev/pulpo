@@ -68,8 +68,8 @@ pub fn symbols_to_exchange_info(symbols: Vec<BitgetSymbolRaw>) -> ExchangeInfo {
 
 #[derive(Debug, Deserialize)]
 pub struct BitgetOrderBookData {
-    pub asks: Vec<[String; 2]>,
-    pub bids: Vec<[String; 2]>,
+    pub asks: Vec<[serde_json::Value; 2]>,
+    pub bids: Vec<[serde_json::Value; 2]>,
     pub ts: String,
 }
 
@@ -222,23 +222,22 @@ impl BitgetWsTradeRaw {
 
 #[derive(Debug, Deserialize)]
 pub struct BitgetWsOrderBook {
-    pub asks: Vec<[String; 2]>,
-    pub bids: Vec<[String; 2]>,
+    pub asks: Vec<[serde_json::Value; 2]>,
+    pub bids: Vec<[serde_json::Value; 2]>,
     pub ts: String,
     #[serde(default)]
-    pub seq: Option<String>,
+    pub seq: Option<u64>,
 }
 
 impl BitgetWsOrderBook {
     pub fn into_orderbook(self, symbol: Symbol) -> OrderBook {
-        let seq = self.seq.as_deref().and_then(|s| s.parse::<u64>().ok());
         OrderBook {
             exchange: ExchangeId::BitgetSpot,
             symbol,
             bids: parse_levels(&self.bids),
             asks: parse_levels(&self.asks),
             timestamp_ms: self.ts.parse::<u64>().unwrap_or(0),
-            sequence: seq,
+            sequence: self.seq,
         }
     }
 }
@@ -252,11 +251,20 @@ pub fn parse_ws_kline(row: &[String], symbol: Symbol) -> Option<Candle> {
 // Helper functions
 // ---------------------------------------------------------------------------
 
-fn parse_levels(raw: &[[String; 2]]) -> Vec<Level> {
+/// Convert a JSON value (string or number) to its string representation.
+fn json_value_to_str(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn parse_levels(raw: &[[serde_json::Value; 2]]) -> Vec<Level> {
     raw.iter()
         .filter_map(|pair| {
-            let price = Decimal::from_str(&pair[0]).ok()?;
-            let qty = Decimal::from_str(&pair[1]).ok()?;
+            let price = Decimal::from_str(&json_value_to_str(&pair[0])?).ok()?;
+            let qty = Decimal::from_str(&json_value_to_str(&pair[1])?).ok()?;
             Some(Level::new(price, qty))
         })
         .collect()
@@ -319,7 +327,7 @@ pub fn interval_to_bitget_ws(interval: Interval) -> &'static str {
 /// Map a Bitget status string to a unified SymbolStatus.
 pub fn bitget_status_to_unified(status: &str) -> SymbolStatus {
     match status {
-        "online" => SymbolStatus::Trading,
+        "online" | "normal" => SymbolStatus::Trading,
         "halt" => SymbolStatus::Halted,
         _ => SymbolStatus::Unknown,
     }
@@ -564,7 +572,8 @@ mod tests {
                 "asks": [["50001.00", "2.0"]],
                 "bids": [["50000.00", "1.0"]],
                 "ts": "1700000000000",
-                "seq": "100"
+                "checksum": 0,
+                "seq": 100
             }"#,
         )
         .unwrap();
@@ -599,8 +608,8 @@ mod tests {
     #[test]
     fn test_parse_levels() {
         let raw = vec![
-            ["100.50".to_string(), "1.5".to_string()],
-            ["99.00".to_string(), "2.0".to_string()],
+            [serde_json::json!("100.50"), serde_json::json!("1.5")],
+            [serde_json::json!(99.00), serde_json::json!(2.0)],
         ];
         let levels = parse_levels(&raw);
         assert_eq!(levels.len(), 2);
@@ -613,8 +622,8 @@ mod tests {
     #[test]
     fn test_parse_levels_skips_invalid() {
         let raw = vec![
-            ["bad".to_string(), "1.0".to_string()],
-            ["50.00".to_string(), "3.0".to_string()],
+            [serde_json::json!("bad"), serde_json::json!("1.0")],
+            [serde_json::json!("50.00"), serde_json::json!("3.0")],
         ];
         let levels = parse_levels(&raw);
         assert_eq!(levels.len(), 1);

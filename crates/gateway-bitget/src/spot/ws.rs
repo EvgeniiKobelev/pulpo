@@ -1,5 +1,5 @@
 use crate::spot::mapper::*;
-use futures::{SinkExt, StreamExt};
+use futures::{stream::SelectAll, SinkExt, StreamExt};
 use gateway_core::*;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -73,6 +73,12 @@ async fn subscribe_and_stream(
                                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
                                     // Skip subscribe confirmation responses.
                                     if json.get("event").and_then(|v| v.as_str()) == Some("subscribe") {
+                                        debug!("Bitget WS subscribed: {}", text);
+                                        continue;
+                                    }
+                                    // Log error events from the server.
+                                    if json.get("event").and_then(|v| v.as_str()) == Some("error") {
+                                        warn!("Bitget WS error event: {}", text);
                                         continue;
                                     }
                                     // Only forward messages that carry a "data" field.
@@ -238,58 +244,80 @@ pub async fn stream_candles(
 // Batch (multi-symbol) streams — single WS connection
 // ---------------------------------------------------------------------------
 
-/// Stream order-book updates for multiple symbols over a single WebSocket
-/// connection by subscribing to all topics at once.
+/// Stream order-book updates for multiple symbols.
+///
+/// Symbols are split into chunks of 50 with a separate WebSocket connection
+/// per chunk (Bitget silently drops subscriptions beyond ~50 topics on a
+/// single connection). The resulting streams are merged via `SelectAll`.
 pub async fn stream_orderbooks_batch(
     _config: &ExchangeConfig,
     symbols: &[Symbol],
 ) -> Result<BoxStream<OrderBook>> {
-    let args: Vec<serde_json::Value> = symbols
-        .iter()
-        .map(|s| sub_arg("books5", &unified_to_bitget(s)))
-        .collect();
-    let raw_stream = subscribe_and_stream(args).await?;
+    const CHUNK_SIZE: usize = 50;
 
-    Ok(Box::pin(raw_stream.filter_map(|json| async move {
-        let arg = json.get("arg")?;
-        let inst_id = arg.get("instId")?.as_str()?;
-        let symbol = bitget_symbol_to_unified(inst_id);
-        let data = json.get("data")?.as_array()?;
-        let first = data.first()?;
-        let raw: BitgetWsOrderBook = serde_json::from_value(first.clone()).ok()?;
-        Some(raw.into_orderbook(symbol))
-    })))
+    let mut all = SelectAll::new();
+    for chunk in symbols.chunks(CHUNK_SIZE) {
+        let args: Vec<serde_json::Value> = chunk
+            .iter()
+            .map(|s| sub_arg("books5", &unified_to_bitget(s)))
+            .collect();
+        let raw_stream = subscribe_and_stream(args).await?;
+        let chunk_stream: BoxStream<OrderBook> =
+            Box::pin(raw_stream.filter_map(|json| async move {
+                let arg = json.get("arg")?;
+                let inst_id = arg.get("instId")?.as_str()?;
+                let symbol = bitget_symbol_to_unified(inst_id);
+                let data = json.get("data")?.as_array()?;
+                let first = data.first()?;
+                let raw: BitgetWsOrderBook = serde_json::from_value(first.clone()).ok()?;
+                Some(raw.into_orderbook(symbol))
+            }));
+        all.push(chunk_stream);
+    }
+    Ok(Box::pin(all))
 }
 
-/// Stream real-time trades for multiple symbols over a single WebSocket
-/// connection by subscribing to all topics at once.
+/// Stream real-time trades for multiple symbols.
+///
+/// Symbols are split into chunks of 50 with a separate WebSocket connection
+/// per chunk. The resulting streams are merged via `SelectAll`.
 pub async fn stream_trades_batch(
     _config: &ExchangeConfig,
     symbols: &[Symbol],
 ) -> Result<BoxStream<Trade>> {
-    let args: Vec<serde_json::Value> = symbols
-        .iter()
-        .map(|s| sub_arg("trade", &unified_to_bitget(s)))
-        .collect();
-    let raw_stream = subscribe_and_stream(args).await?;
+    const CHUNK_SIZE: usize = 50;
 
-    Ok(Box::pin(
-        futures::stream::unfold(raw_stream, |mut stream| async move {
-            loop {
-                let json = stream.next().await?;
-                let arg = json.get("arg")?;
-                let inst_id = arg.get("instId")?.as_str()?;
-                let symbol = bitget_symbol_to_unified(inst_id);
-                let data = json.get("data")?;
-                if let Ok(trades) = serde_json::from_value::<Vec<BitgetWsTradeRaw>>(data.clone()) {
-                    if !trades.is_empty() {
-                        let converted: Vec<Trade> =
-                            trades.into_iter().map(|t| t.into_trade(symbol.clone())).collect();
-                        return Some((futures::stream::iter(converted), stream));
+    let mut all = SelectAll::new();
+    for chunk in symbols.chunks(CHUNK_SIZE) {
+        let args: Vec<serde_json::Value> = chunk
+            .iter()
+            .map(|s| sub_arg("trade", &unified_to_bitget(s)))
+            .collect();
+        let raw_stream = subscribe_and_stream(args).await?;
+        let chunk_stream: BoxStream<Trade> = Box::pin(
+            futures::stream::unfold(raw_stream, |mut stream| async move {
+                loop {
+                    let json = stream.next().await?;
+                    let arg = json.get("arg")?;
+                    let inst_id = arg.get("instId")?.as_str()?;
+                    let symbol = bitget_symbol_to_unified(inst_id);
+                    let data = json.get("data")?;
+                    if let Ok(trades) =
+                        serde_json::from_value::<Vec<BitgetWsTradeRaw>>(data.clone())
+                    {
+                        if !trades.is_empty() {
+                            let converted: Vec<Trade> = trades
+                                .into_iter()
+                                .map(|t| t.into_trade(symbol.clone()))
+                                .collect();
+                            return Some((futures::stream::iter(converted), stream));
+                        }
                     }
                 }
-            }
-        })
-        .flatten(),
-    ))
+            })
+            .flatten(),
+        );
+        all.push(chunk_stream);
+    }
+    Ok(Box::pin(all))
 }
