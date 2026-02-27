@@ -7,7 +7,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
 
-const WS_URL: &str = "wss://mainnet.zklighter.elliot.ai/stream";
+const WS_URL: &str = "wss://mainnet.zklighter.elliot.ai/stream?readonly=true";
 
 /// Maximum number of channel subscriptions per WebSocket connection.
 /// Lighter allows 100 per connection; we use 50 to stay safely within limits.
