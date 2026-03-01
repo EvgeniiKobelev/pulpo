@@ -19,6 +19,7 @@ pub enum ExchangeId {
     Mexc,
     MexcFutures,
     LighterFutures,
+    AsterdexFutures,
 }
 
 impl fmt::Display for ExchangeId {
@@ -38,6 +39,7 @@ impl fmt::Display for ExchangeId {
             Self::Mexc => write!(f, "mexc"),
             Self::MexcFutures => write!(f, "mexc_futures"),
             Self::LighterFutures => write!(f, "lighter_futures"),
+            Self::AsterdexFutures => write!(f, "asterdex_futures"),
         }
     }
 }
