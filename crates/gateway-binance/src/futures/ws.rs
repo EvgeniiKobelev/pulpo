@@ -10,6 +10,11 @@ use tracing::{debug, info, warn};
 const WS_URL: &str = "wss://fstream.binance.com/ws";
 const COMBINED_WS_URL: &str = "wss://fstream.binance.com/stream";
 
+/// Maximum number of streams per single WebSocket connection.
+/// Binance allows up to 200 but we stay well below the limit
+/// to avoid connection resets caused by excessive data throughput.
+const MAX_STREAMS_PER_CONNECTION: usize = 100;
+
 // ---------------------------------------------------------------------------
 // Core helper
 // ---------------------------------------------------------------------------
@@ -245,8 +250,9 @@ pub async fn stream_liquidations(
 // Combined (multi-symbol) streams
 // ---------------------------------------------------------------------------
 
-/// Stream order-book depth updates for multiple symbols over a single
-/// combined WebSocket connection.
+/// Stream order-book depth updates for multiple symbols, automatically
+/// sharding subscriptions across several WebSocket connections to stay
+/// within Binance limits and avoid connection resets.
 ///
 /// Uses the `/stream` endpoint with SUBSCRIBE method instead of URL query
 /// params to avoid URL-length issues with many symbols.
@@ -254,23 +260,37 @@ pub async fn stream_orderbooks_combined(
     _config: &ExchangeConfig,
     symbols: &[Symbol],
 ) -> Result<BoxStream<OrderBook>> {
-    let streams: Vec<String> = symbols
+    let all_streams: Vec<String> = symbols
         .iter()
         .map(|s| format!("{}@depth@100ms", unified_to_binance(s).to_lowercase()))
         .collect();
 
-    let raw = subscribe_and_stream(COMBINED_WS_URL, streams).await?;
+    let num_connections = all_streams.chunks(MAX_STREAMS_PER_CONNECTION).len();
+    if num_connections > 1 {
+        info!(
+            "Binance Futures WS: sharding {} depth streams across {} connections",
+            all_streams.len(),
+            num_connections
+        );
+    }
 
-    Ok(Box::pin(raw.filter_map(|json| async move {
-        // Combined stream wraps data: {"stream":"...","data":{...}}
-        let data = json.get("data")?.clone();
-        let raw: BinanceFuturesWsDepthRaw = serde_json::from_value(data).ok()?;
-        Some(raw.into_orderbook())
-    })))
+    let mut select_all = futures::stream::SelectAll::new();
+    for chunk in all_streams.chunks(MAX_STREAMS_PER_CONNECTION) {
+        let raw = subscribe_and_stream(COMBINED_WS_URL, chunk.to_vec()).await?;
+        let mapped: BoxStream<OrderBook> = Box::pin(raw.filter_map(|json| async move {
+            let data = json.get("data")?.clone();
+            let raw: BinanceFuturesWsDepthRaw = serde_json::from_value(data).ok()?;
+            Some(raw.into_orderbook())
+        }));
+        select_all.push(mapped);
+    }
+
+    Ok(Box::pin(select_all))
 }
 
-/// Stream real-time trades for multiple symbols over a single combined
-/// WebSocket connection.
+/// Stream real-time trades for multiple symbols, automatically
+/// sharding subscriptions across several WebSocket connections to stay
+/// within Binance limits and avoid connection resets.
 ///
 /// Uses the `/stream` endpoint with SUBSCRIBE method instead of URL query
 /// params to avoid URL-length issues with many symbols.
@@ -278,16 +298,30 @@ pub async fn stream_trades_combined(
     _config: &ExchangeConfig,
     symbols: &[Symbol],
 ) -> Result<BoxStream<Trade>> {
-    let streams: Vec<String> = symbols
+    let all_streams: Vec<String> = symbols
         .iter()
         .map(|s| format!("{}@trade", unified_to_binance(s).to_lowercase()))
         .collect();
 
-    let raw = subscribe_and_stream(COMBINED_WS_URL, streams).await?;
+    let num_connections = all_streams.chunks(MAX_STREAMS_PER_CONNECTION).len();
+    if num_connections > 1 {
+        info!(
+            "Binance Futures WS: sharding {} trade streams across {} connections",
+            all_streams.len(),
+            num_connections
+        );
+    }
 
-    Ok(Box::pin(raw.filter_map(|json| async move {
-        let data = json.get("data")?.clone();
-        let raw: BinanceFuturesWsTradeRaw = serde_json::from_value(data).ok()?;
-        Some(raw.into_trade())
-    })))
+    let mut select_all = futures::stream::SelectAll::new();
+    for chunk in all_streams.chunks(MAX_STREAMS_PER_CONNECTION) {
+        let raw = subscribe_and_stream(COMBINED_WS_URL, chunk.to_vec()).await?;
+        let mapped: BoxStream<Trade> = Box::pin(raw.filter_map(|json| async move {
+            let data = json.get("data")?.clone();
+            let raw: BinanceFuturesWsTradeRaw = serde_json::from_value(data).ok()?;
+            Some(raw.into_trade())
+        }));
+        select_all.push(mapped);
+    }
+
+    Ok(Box::pin(select_all))
 }
