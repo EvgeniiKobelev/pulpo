@@ -11,5 +11,6 @@ members = [
     "crates/gateway-kucoin",
     "crates/gateway-lighter",
     "crates/gateway-asterdex",
+    "crates/gateway-hyperliquid",
     "crates/gateway-manager",
 ]
