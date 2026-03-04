@@ -468,6 +468,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "gateway-bitunix"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "gateway-core",
+ "reqwest",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "gateway-blofin"
 version = "0.1.0"
 dependencies = [
