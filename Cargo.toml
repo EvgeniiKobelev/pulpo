@@ -15,5 +15,6 @@ members = [
     "crates/gateway-phemex",
     "crates/gateway-blofin",
     "crates/gateway-toobit",
+    "crates/gateway-bitunix",
     "crates/gateway-manager",
 ]
