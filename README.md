@@ -14,28 +14,32 @@ One trait. Multiple exchanges. Spot & Futures. Real-time WebSocket streams.
 ---
 
 Pulpo Loco provides a unified `Exchange` trait that abstracts away the differences between crypto exchange APIs.
-Write your trading logic once — run it on Binance, Bitget, Bybit, OKX, Gate.io, MEXC, KuCoin, Lighter, and more.
+Write your trading logic once — run it on Binance, Bitget, Bybit, OKX, Gate.io, MEXC, KuCoin, Lighter, Asterdex, Hyperliquid, Phemex, Blofin, Toobit, Bitunix, XT.com, and more.
 
 </div>
 
 ## Architecture
 
 ```
-┌───────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                             gateway-manager                                                    │
-│                  GatewayManager: register / register_futures / query / merge                                    │
-└──┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬────────────────────────────────┘
-   │          │          │          │          │          │          │          │
-┌──▼───────┐┌─▼────────┐┌▼────────┐┌▼────────┐┌▼────────┐┌▼───────┐┌▼────────┐┌▼─────────┐
-│ binance  ││ bitget   ││ bybit   ││ okx     ││ gate    ││ mexc   ││ kucoin  ││ lighter  │
-│ spot+fut ││ spot+fut ││ spot+fut ││ spot+fut ││ spot+fut││ spot   ││ spot    ││ futures  │
-│ REST+WS  ││ REST+WS  ││ REST+WS  ││ REST+WS  ││ REST+WS ││ REST+WS││ REST+WS ││ REST+WS  │
-└──┬───────┘└─┬────────┘└┬────────┘└┬────────┘└┬────────┘└┬───────┘└┬────────┘└┬─────────┘
-   │          │          │          │          │          │          │          │
-┌──▼──────────▼──────────▼──────────▼──────────▼──────────▼──────────▼──────────▼──────────┐
-│                                      gateway-core                                         │
-│            Exchange + FuturesExchange traits, types, errors, config                       │
-└───────────────────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                              gateway-manager                                                                  │
+│                                   GatewayManager: register / register_futures / query / merge                                                 │
+└──┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬────────┘
+   │          │          │          │          │          │          │          │          │          │          │          │          │
+┌──▼───────┐┌─▼────────┐┌▼────────┐┌▼────────┐┌▼────────┐┌▼───────┐┌▼────────┐┌▼─────────┐┌▼─────────┐┌▼────────┐┌▼────────┐┌▼────────┐┌▼──────┐
+│ binance  ││ bitget   ││ bybit   ││ okx     ││ gate    ││ mexc   ││ kucoin  ││ lighter  ││asterdex  ││hyperl.  ││ phemex  ││ blofin  ││toobit │
+│ spot+fut ││ spot+fut ││ spot+fut ││ spot+fut ││ spot+fut││spot+fut││ spot    ││ futures  ││ futures  ││ futures ││ futures ││ futures ││futures│
+│ REST+WS  ││ REST+WS  ││ REST+WS  ││ REST+WS  ││ REST+WS ││ REST+WS││ REST+WS ││ REST+WS  ││ REST+WS  ││ REST+WS ││ REST+WS ││ REST+WS ││REST+WS│
+└──┬───────┘└─┬────────┘└┬────────┘└┬────────┘└┬────────┘└┬───────┘└┬────────┘└┬─────────┘└┬─────────┘└┬────────┘└┬────────┘└┬────────┘└┬──────┘
+   │          │          │          │          │          │          │          │           │           │          │          │          │
+   │  ┌───────────────────────────────────────────────────────────────────────────────────────────────────────────────┐       │          │
+   │  │                                        + bitunix (futures) + xt (futures)                                     │       │          │
+   │  └───────────────────────────────────────────────────────────────────────────────────────────────────────────────┘       │          │
+   │          │          │          │          │          │          │          │           │           │          │          │          │
+┌──▼──────────▼──────────▼──────────▼──────────▼──────────▼──────────▼──────────▼───────────▼───────────▼──────────▼──────────▼──────────▼──────┐
+│                                                         gateway-core                                                                          │
+│                              Exchange + FuturesExchange traits, types, errors, config                                                         │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 | Crate | Description |
@@ -46,9 +50,16 @@ Write your trading logic once — run it on Binance, Bitget, Bybit, OKX, Gate.io
 | `gateway-bybit` | Bybit Spot & Futures — REST + WebSocket |
 | `gateway-okx` | OKX Spot & Futures — REST + WebSocket |
 | `gateway-gate` | Gate.io Spot & Futures — REST + WebSocket |
-| `gateway-mexc` | MEXC Spot — REST + WebSocket (protobuf) |
+| `gateway-mexc` | MEXC Spot & Futures — REST + WebSocket (protobuf) |
 | `gateway-kucoin` | KuCoin Spot — REST + WebSocket |
 | `gateway-lighter` | Lighter DEX Futures — REST + WebSocket |
+| `gateway-asterdex` | AsterDEX Futures — REST + WebSocket |
+| `gateway-hyperliquid` | Hyperliquid Futures — REST + WebSocket |
+| `gateway-phemex` | Phemex Futures — REST + WebSocket |
+| `gateway-blofin` | BloFin Futures — REST + WebSocket |
+| `gateway-toobit` | Toobit Futures — REST + WebSocket |
+| `gateway-bitunix` | Bitunix Futures — REST + WebSocket |
+| `gateway-xt` | XT.com Futures — REST + WebSocket |
 | `gateway-manager` | Multi-exchange orchestrator — parallel queries, merged streams, futures aggregation |
 
 ## Quick Start
@@ -175,12 +186,19 @@ cargo run -p gateway-mexc    --example basic_rest
 Funding rate, mark price, open interest, order book:
 
 ```bash
-cargo run -p gateway-binance --example futures_rest
-cargo run -p gateway-bitget  --example futures_rest
-cargo run -p gateway-bybit   --example futures_rest
-cargo run -p gateway-okx     --example futures_rest
-cargo run -p gateway-gate    --example futures_rest
-cargo run -p gateway-lighter --example futures_rest
+cargo run -p gateway-binance     --example futures_rest
+cargo run -p gateway-bitget      --example futures_rest
+cargo run -p gateway-bybit       --example futures_rest
+cargo run -p gateway-okx         --example futures_rest
+cargo run -p gateway-gate        --example futures_rest
+cargo run -p gateway-lighter     --example futures_rest
+cargo run -p gateway-asterdex    --example futures_rest
+cargo run -p gateway-hyperliquid --example futures_rest
+cargo run -p gateway-phemex      --example futures_rest
+cargo run -p gateway-blofin      --example futures_rest
+cargo run -p gateway-toobit      --example futures_rest
+cargo run -p gateway-bitunix     --example futures_rest
+cargo run -p gateway-xt          --example futures_rest
 ```
 
 ### WebSocket Streams (Spot)
@@ -199,14 +217,44 @@ cargo run -p gateway-kucoin  --example stream_trades
 
 ### WebSocket Streams (Futures)
 
-Futures orderbook, trades, candles, mark price, liquidations:
+Futures orderbook, trades, mark price, liquidations:
 
 ```bash
-cargo run -p gateway-bitget  --example stream_futures
-cargo run -p gateway-gate    --example stream_futures
-cargo run -p gateway-lighter --example stream_trades
-cargo run -p gateway-lighter --example stream_orderbook
-cargo run -p gateway-lighter --example stream_mark_price
+cargo run -p gateway-bitget      --example stream_futures
+cargo run -p gateway-gate        --example stream_futures
+cargo run -p gateway-mexc        --example stream_futures
+cargo run -p gateway-lighter     --example stream_trades
+cargo run -p gateway-lighter     --example stream_orderbook
+cargo run -p gateway-lighter     --example stream_mark_price
+cargo run -p gateway-asterdex    --example stream_orderbook
+cargo run -p gateway-asterdex    --example stream_trades
+cargo run -p gateway-asterdex    --example stream_mark_price
+cargo run -p gateway-hyperliquid --example stream_orderbook
+cargo run -p gateway-hyperliquid --example stream_trades
+cargo run -p gateway-phemex      --example stream_orderbook
+cargo run -p gateway-phemex      --example stream_trades
+cargo run -p gateway-blofin      --example stream_orderbook
+cargo run -p gateway-blofin      --example stream_trades
+cargo run -p gateway-toobit      --example stream_orderbook
+cargo run -p gateway-toobit      --example stream_trades
+cargo run -p gateway-bitunix     --example stream_orderbook
+cargo run -p gateway-bitunix     --example stream_trades
+cargo run -p gateway-xt          --example stream_orderbook
+cargo run -p gateway-xt          --example stream_trades
+```
+
+### Batch WebSocket (Futures)
+
+Subscribe to all symbols at once (multi-connection sharding):
+
+```bash
+cargo run -p gateway-hyperliquid --example stream_orderbook_all
+cargo run -p gateway-phemex      --example stream_orderbook_all
+cargo run -p gateway-blofin      --example stream_orderbook_all
+cargo run -p gateway-toobit      --example stream_orderbook_all
+cargo run -p gateway-bitunix     --example stream_orderbook_all
+cargo run -p gateway-xt          --example stream_orderbook_all
+cargo run -p gateway-mexc        --example stream_futures_batch
 ```
 
 ### Multi-exchange
@@ -226,9 +274,16 @@ cargo run -p gateway-manager --example multi_exchange
 | Bybit | yes | yes | yes | yes | yes (multi-topic) |
 | OKX | yes | yes | yes | yes | yes (multi-topic) |
 | Gate.io | yes | yes | yes | yes | yes (multi-topic) |
-| MEXC | yes | — | yes | yes | yes (multi-topic) |
+| MEXC | yes | yes | yes | yes | yes (multi-topic) |
 | KuCoin | yes | — | yes | yes | yes (multi-topic) |
 | Lighter | — | yes | yes | yes | yes (chunked) |
+| AsterDEX | — | yes | yes | yes | yes (chunked) |
+| Hyperliquid | — | yes | yes | yes | yes (chunked) |
+| Phemex | — | yes | yes | yes | yes (chunked) |
+| BloFin | — | yes | yes | yes | yes (chunked) |
+| Toobit | — | yes | yes | yes | yes (chunked) |
+| Bitunix | — | yes | yes | yes | yes (chunked) |
+| XT.com | — | yes | yes | yes | yes (chunked) |
 
 ## Project Structure
 
@@ -245,80 +300,64 @@ pulpo_loco/
     │       ├── error.rs                # GatewayError
     │       ├── config.rs               # ExchangeConfig, RestConfig, WsConfig
     │       └── stream.rs               # BoxStream, StreamEvent, Subscription
+    │
+    │   ── Spot & Futures ──────────────────────────────────────────────────
+    │
     ├── gateway-binance/                # Binance (Spot & Futures)
-    │   ├── src/
-    │   │   ├── lib.rs                  # BinanceSpot, BinanceFutures
-    │   │   ├── spot/                   # Spot: mod.rs, rest.rs, ws.rs, mapper.rs
-    │   │   └── futures/                # Futures: mod.rs, rest.rs, ws.rs, mapper.rs
-    │   └── examples/
-    │       ├── basic_rest.rs
-    │       ├── futures_rest.rs
-    │       └── stream_trades.rs
+    │   ├── src/{lib,spot/,futures/}    # BinanceSpot, BinanceFutures
+    │   └── examples/                   # basic_rest, futures_rest, stream_trades
     ├── gateway-bitget/                 # Bitget (Spot & Futures)
-    │   ├── src/
-    │   │   ├── lib.rs                  # BitgetSpot, BitgetFutures
-    │   │   ├── spot/                   # Spot: mod.rs, rest.rs, ws.rs, mapper.rs
-    │   │   └── futures/                # Futures: mod.rs, rest.rs, ws.rs, mapper.rs
-    │   └── examples/
-    │       ├── basic_rest.rs
-    │       ├── futures_rest.rs
-    │       ├── stream_trades.rs
-    │       └── stream_futures.rs
+    │   ├── src/{lib,spot/,futures/}    # BitgetSpot, BitgetFutures
+    │   └── examples/                   # basic_rest, futures_rest, stream_trades, stream_futures
     ├── gateway-bybit/                  # Bybit (Spot & Futures)
-    │   ├── src/
-    │   │   ├── lib.rs                  # BybitSpot, BybitFutures
-    │   │   ├── spot/                   # Spot: mod.rs, rest.rs, ws.rs, mapper.rs
-    │   │   └── futures/                # Futures: mod.rs, rest.rs, ws.rs, mapper.rs
-    │   └── examples/
-    │       ├── basic_rest.rs
-    │       ├── futures_rest.rs
-    │       └── stream_trades.rs
+    │   ├── src/{lib,spot/,futures/}    # BybitSpot, BybitFutures
+    │   └── examples/                   # basic_rest, futures_rest, stream_trades
     ├── gateway-okx/                    # OKX (Spot & Futures)
-    │   ├── src/
-    │   │   ├── lib.rs                  # OkxSpot, OkxFutures
-    │   │   ├── spot/                   # Spot: mod.rs, rest.rs, ws.rs, mapper.rs
-    │   │   └── futures/                # Futures: mod.rs, rest.rs, ws.rs, mapper.rs
-    │   └── examples/
-    │       ├── basic_rest.rs
-    │       ├── futures_rest.rs
-    │       └── stream_trades.rs
+    │   ├── src/{lib,spot/,futures/}    # OkxSpot, OkxFutures
+    │   └── examples/                   # basic_rest, futures_rest, stream_trades
     ├── gateway-gate/                   # Gate.io (Spot & Futures)
-    │   ├── src/
-    │   │   ├── lib.rs                  # GateSpot, GateFutures
-    │   │   ├── spot/                   # Spot: mod.rs, rest.rs, ws.rs, mapper.rs
-    │   │   └── futures/                # Futures: mod.rs, rest.rs, ws.rs, mapper.rs
-    │   └── examples/
-    │       ├── basic_rest.rs
-    │       ├── futures_rest.rs
-    │       ├── stream_trades.rs
-    │       └── stream_futures.rs
-    ├── gateway-mexc/                   # MEXC (Spot only)
-    │   ├── src/
-    │   │   ├── lib.rs                  # MexcSpot
-    │   │   └── spot/                   # Spot: mod.rs, rest.rs, ws.rs, mapper.rs, proto.rs
-    │   └── examples/
-    │       ├── basic_rest.rs
-    │       ├── stream_trades.rs
-    │       └── ws_debug.rs
+    │   ├── src/{lib,spot/,futures/}    # GateSpot, GateFutures
+    │   └── examples/                   # basic_rest, futures_rest, stream_trades, stream_futures
+    ├── gateway-mexc/                   # MEXC (Spot & Futures)
+    │   ├── src/{lib,spot/,futures/}    # MexcSpot, MexcFutures
+    │   └── examples/                   # basic_rest, stream_trades, stream_futures, stream_futures_batch
+    │
+    │   ── Spot Only ───────────────────────────────────────────────────────
+    │
     ├── gateway-kucoin/                 # KuCoin (Spot only)
-    │   ├── src/
-    │   │   ├── lib.rs                  # KucoinSpot
-    │   │   └── spot/                   # Spot: mod.rs, rest.rs, ws.rs, mapper.rs
-    │   └── examples/
-    │       ├── stream_trades.rs
-    │       └── ws_debug.rs
-    ├── gateway-lighter/                # Lighter DEX (Futures only)
-    │   ├── src/
-    │   │   ├── lib.rs                  # LighterFutures
-    │   │   └── futures/                # Futures: mod.rs, rest.rs, ws.rs, mapper.rs
-    │   └── examples/
-    │       ├── futures_rest.rs
-    │       ├── stream_trades.rs
-    │       ├── stream_orderbook.rs
-    │       └── stream_mark_price.rs
+    │   ├── src/{lib,spot/}             # KucoinSpot
+    │   └── examples/                   # stream_trades, ws_debug
+    │
+    │   ── Futures Only (Perpetuals) ───────────────────────────────────────
+    │
+    ├── gateway-lighter/                # Lighter DEX
+    │   ├── src/{lib,futures/}          # LighterFutures
+    │   └── examples/                   # futures_rest, stream_trades, stream_orderbook, stream_mark_price
+    ├── gateway-asterdex/               # AsterDEX
+    │   ├── src/{lib,futures/}          # AsterdexFutures
+    │   └── examples/                   # futures_rest, stream_trades, stream_orderbook, stream_mark_price, stream_liquidations
+    ├── gateway-hyperliquid/            # Hyperliquid
+    │   ├── src/{lib,futures/}          # HyperliquidFutures
+    │   └── examples/                   # futures_rest, stream_trades, stream_orderbook, stream_orderbook_all, stream_mark_price
+    ├── gateway-phemex/                 # Phemex
+    │   ├── src/{lib,futures/}          # PhemexFutures
+    │   └── examples/                   # futures_rest, stream_trades, stream_orderbook, stream_orderbook_all
+    ├── gateway-blofin/                 # BloFin
+    │   ├── src/{lib,futures/}          # BlofinFutures
+    │   └── examples/                   # futures_rest, stream_trades, stream_orderbook, stream_orderbook_all
+    ├── gateway-toobit/                 # Toobit
+    │   ├── src/{lib,futures/}          # ToobitFutures
+    │   └── examples/                   # futures_rest, stream_trades, stream_orderbook, stream_orderbook_all
+    ├── gateway-bitunix/                # Bitunix
+    │   ├── src/{lib,futures/}          # BitunixFutures
+    │   └── examples/                   # futures_rest, stream_trades, stream_orderbook, stream_orderbook_all
+    ├── gateway-xt/                     # XT.com
+    │   ├── src/{lib,futures/}          # XtFutures
+    │   └── examples/                   # futures_rest, stream_trades, stream_orderbook, stream_orderbook_all
+    │
+    │   ── Orchestrator ────────────────────────────────────────────────────
+    │
     └── gateway-manager/                # Multi-exchange orchestrator
-        ├── src/
-        │   └── lib.rs                  # GatewayManager
-        └── examples/
-            └── multi_exchange.rs
+        ├── src/lib.rs                  # GatewayManager
+        └── examples/                   # multi_exchange
 ```
