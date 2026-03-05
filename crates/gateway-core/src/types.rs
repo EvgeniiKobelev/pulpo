@@ -24,6 +24,7 @@ pub enum ExchangeId {
     BlofinFutures,
     ToobitFutures,
     BitunixFutures,
+    XtFutures,
 }
 
 impl fmt::Display for ExchangeId {
@@ -48,6 +49,7 @@ impl fmt::Display for ExchangeId {
             Self::BlofinFutures => write!(f, "blofin_futures"),
             Self::ToobitFutures => write!(f, "toobit_futures"),
             Self::BitunixFutures => write!(f, "bitunix_futures"),
+            Self::XtFutures => write!(f, "xt_futures"),
         }
     }
 }
