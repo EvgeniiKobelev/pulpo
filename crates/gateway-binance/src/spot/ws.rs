@@ -492,8 +492,8 @@ async fn handle_snapshot(
     let mut first_applied = false;
     let mut last_event_time = 0u64;
     while let Some(ev) = state.buffer.pop_front() {
-        if ev.last_update_id < new_book.last_update_id {
-            // Устаревший event, дропаем.
+        if ev.last_update_id <= new_book.last_update_id {
+            // Устаревший event (u <= snap.lastUpdateId) — по Spot docs дропаем.
             continue;
         }
         if !first_applied {
