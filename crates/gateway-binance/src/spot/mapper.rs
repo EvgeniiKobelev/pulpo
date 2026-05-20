@@ -200,6 +200,10 @@ pub struct BinanceWsDepthRaw {
     pub asks: Vec<[String; 2]>,
     #[serde(rename = "E")]
     pub event_time: u64,
+    /// First update ID in event (Spot uses U..u inclusive sequence range).
+    #[serde(rename = "U", default)]
+    pub first_update_id: u64,
+    /// Final update ID in event.
     #[serde(rename = "u")]
     pub last_update_id: u64,
 }

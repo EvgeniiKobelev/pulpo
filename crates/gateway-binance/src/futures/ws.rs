@@ -1,11 +1,23 @@
 use crate::futures::mapper::*;
+use crate::futures::rest::BinanceFuturesRest;
+use crate::local_book::LocalOrderBook;
+use crate::rate_limit::futures_limiter;
 use futures::{SinkExt, StreamExt};
 use gateway_core::*;
+use rust_decimal::Decimal;
+use std::collections::{HashMap, VecDeque};
+use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
+
+const TOP_LEVELS: usize = 1000;
+const MAX_BUFFER: usize = 1024;
+/// `/fapi/v1/depth?limit=1000` weight.
+const DEPTH_WEIGHT: u32 = 20;
 
 const WS_URL: &str = "wss://fstream.binance.com/ws";
 const COMBINED_WS_URL: &str = "wss://fstream.binance.com/stream";
@@ -250,14 +262,13 @@ pub async fn stream_liquidations(
 // Combined (multi-symbol) streams
 // ---------------------------------------------------------------------------
 
-/// Stream order-book depth updates for multiple symbols, automatically
-/// sharding subscriptions across several WebSocket connections to stay
-/// within Binance limits and avoid connection resets.
+/// Stream consistent top-1000 order-book updates for Binance Futures.
 ///
-/// Uses the `/stream` endpoint with SUBSCRIBE method instead of URL query
-/// params to avoid URL-length issues with many symbols.
+/// Аналог `spot::ws::stream_orderbooks_combined`, но с Futures-семантикой
+/// sequence id: для каждого diff-события `pu` должен равняться `u` из
+/// предыдущего события. Расхождение → re-sync.
 pub async fn stream_orderbooks_combined(
-    _config: &ExchangeConfig,
+    config: &ExchangeConfig,
     symbols: &[Symbol],
 ) -> Result<BoxStream<OrderBook>> {
     let all_streams: Vec<String> = symbols
@@ -274,18 +285,327 @@ pub async fn stream_orderbooks_combined(
         );
     }
 
-    let mut select_all = futures::stream::SelectAll::new();
+    let rest = Arc::new(BinanceFuturesRest::new(config));
+    let (out_tx, out_rx) = mpsc::channel::<OrderBook>(8192);
+
     for chunk in all_streams.chunks(MAX_STREAMS_PER_CONNECTION) {
         let raw = subscribe_and_stream(COMBINED_WS_URL, chunk.to_vec()).await?;
-        let mapped: BoxStream<OrderBook> = Box::pin(raw.filter_map(|json| async move {
-            let data = json.get("data")?.clone();
-            let raw: BinanceFuturesWsDepthRaw = serde_json::from_value(data).ok()?;
-            Some(raw.into_orderbook())
-        }));
-        select_all.push(mapped);
+        let shard_tx = out_tx.clone();
+        let shard_rest = rest.clone();
+        tokio::spawn(maintain_shard(raw, shard_tx, shard_rest));
     }
 
-    Ok(Box::pin(select_all))
+    Ok(Box::pin(ReceiverStream::new(out_rx)))
+}
+
+// ---------------------------------------------------------------------------
+// Maintain logic (Futures-specific)
+// ---------------------------------------------------------------------------
+
+struct BufferedDiff {
+    first_update_id: u64,
+    last_update_id: u64,
+    prev_update_id: u64,
+    bids: Vec<(Decimal, Decimal)>,
+    asks: Vec<(Decimal, Decimal)>,
+    event_time: u64,
+}
+
+struct SymbolState {
+    book: LocalOrderBook,
+    buffer: VecDeque<BufferedDiff>,
+    bootstrap_in_flight: bool,
+    resync_count: u32,
+}
+
+impl SymbolState {
+    fn new() -> Self {
+        Self {
+            book: LocalOrderBook::new(),
+            buffer: VecDeque::new(),
+            bootstrap_in_flight: false,
+            resync_count: 0,
+        }
+    }
+}
+
+struct SnapshotMsg {
+    symbol: Symbol,
+    last_update_id: u64,
+    bids: Vec<(Decimal, Decimal)>,
+    asks: Vec<(Decimal, Decimal)>,
+}
+
+async fn maintain_shard(
+    mut raw: BoxStream<serde_json::Value>,
+    out_tx: mpsc::Sender<OrderBook>,
+    rest: Arc<BinanceFuturesRest>,
+) {
+    let mut states: HashMap<Symbol, SymbolState> = HashMap::new();
+    let (snap_tx, mut snap_rx) = mpsc::channel::<SnapshotMsg>(256);
+
+    loop {
+        tokio::select! {
+            biased;
+            ev = raw.next() => {
+                let Some(json) = ev else {
+                    debug!("Binance Futures maintain shard: ws stream ended");
+                    return;
+                };
+                if let Err(e) = handle_ws_event(&json, &mut states, &out_tx, &rest, &snap_tx).await {
+                    debug!(error = %e, "binance futures ws event ignored");
+                }
+            }
+            Some(snap) = snap_rx.recv() => {
+                handle_snapshot(snap, &mut states, &out_tx).await;
+            }
+        }
+    }
+}
+
+async fn handle_ws_event(
+    json: &serde_json::Value,
+    states: &mut HashMap<Symbol, SymbolState>,
+    out_tx: &mpsc::Sender<OrderBook>,
+    rest: &Arc<BinanceFuturesRest>,
+    snap_tx: &mpsc::Sender<SnapshotMsg>,
+) -> std::result::Result<(), &'static str> {
+    let depth_json = json.get("data").unwrap_or(json);
+    let raw: BinanceFuturesWsDepthRaw = serde_json::from_value(depth_json.clone())
+        .map_err(|_| "parse depth")?;
+
+    let symbol = binance_symbol_to_unified(&raw.symbol);
+    let bids: Vec<(Decimal, Decimal)> =
+        raw.bids.iter().filter_map(|p| parse_level(p)).collect();
+    let asks: Vec<(Decimal, Decimal)> =
+        raw.asks.iter().filter_map(|p| parse_level(p)).collect();
+
+    let state = states.entry(symbol.clone()).or_insert_with(SymbolState::new);
+
+    if !state.book.ready {
+        if state.buffer.len() < MAX_BUFFER {
+            state.buffer.push_back(BufferedDiff {
+                first_update_id: raw.first_update_id,
+                last_update_id: raw.last_update_id,
+                prev_update_id: raw.prev_update_id,
+                bids,
+                asks,
+                event_time: raw.event_time,
+            });
+        }
+        if !state.bootstrap_in_flight {
+            state.bootstrap_in_flight = true;
+            spawn_bootstrap(symbol, rest.clone(), snap_tx.clone());
+        }
+        return Ok(());
+    }
+
+    // Futures sequence validation: pu == last_update_id предыдущего события.
+    let lub = state.book.last_update_id;
+    // Устаревшее событие (u <= lub) — молча дропаем. Такое случается,
+    // когда WS event'ы отправлены биржей до REST snapshot'а, но получены
+    // TCP-сокетом уже после snap_rx.recv().
+    if raw.last_update_id <= lub {
+        return Ok(());
+    }
+    let valid = raw.prev_update_id == lub;
+    if !valid {
+        state.resync_count += 1;
+        warn!(
+            symbol = %symbol,
+            local_lub = lub,
+            event_pu = raw.prev_update_id,
+            event_u = raw.last_update_id,
+            resync_count = state.resync_count,
+            "Binance Futures: sequence gap, triggering re-sync"
+        );
+        state.book.ready = false;
+        state.buffer.clear();
+        state.buffer.push_back(BufferedDiff {
+            first_update_id: raw.first_update_id,
+            last_update_id: raw.last_update_id,
+            prev_update_id: raw.prev_update_id,
+            bids,
+            asks,
+            event_time: raw.event_time,
+        });
+        if !state.bootstrap_in_flight {
+            state.bootstrap_in_flight = true;
+            spawn_bootstrap(symbol, rest.clone(), snap_tx.clone());
+        }
+        return Ok(());
+    }
+
+    state.book.apply_diff(
+        bids.iter().copied(),
+        asks.iter().copied(),
+        raw.last_update_id,
+    );
+
+    let ob = OrderBook {
+        exchange: ExchangeId::BinanceFutures,
+        symbol,
+        bids: bids.iter().map(|(p, q)| Level::new(*p, *q)).collect(),
+        asks: asks.iter().map(|(p, q)| Level::new(*p, *q)).collect(),
+        timestamp_ms: raw.event_time,
+        sequence: Some(raw.last_update_id),
+    };
+    let _ = out_tx.send(ob).await;
+    Ok(())
+}
+
+async fn handle_snapshot(
+    snap: SnapshotMsg,
+    states: &mut HashMap<Symbol, SymbolState>,
+    out_tx: &mpsc::Sender<OrderBook>,
+) {
+    let Some(state) = states.get_mut(&snap.symbol) else {
+        return;
+    };
+    state.bootstrap_in_flight = false;
+
+    let prev_book = if state.book.ready {
+        return;
+    } else {
+        std::mem::take(&mut state.book)
+    };
+
+    let mut new_book = LocalOrderBook::new();
+    new_book.set_snapshot(
+        snap.bids.iter().copied(),
+        snap.asks.iter().copied(),
+        snap.last_update_id,
+    );
+
+    // Futures rule: drop events with u < snapshot.lastUpdateId.
+    // Найти первый event где U <= snapshot.lastUpdateId AND u >= snapshot.lastUpdateId.
+    let mut bootstrap_failed = false;
+    let mut first_applied = false;
+    let mut last_event_time = 0u64;
+    while let Some(ev) = state.buffer.pop_front() {
+        if ev.last_update_id < new_book.last_update_id {
+            continue;
+        }
+        if !first_applied {
+            // Первый event: U <= snap.lastUpdateId AND u >= snap.lastUpdateId.
+            let lub = new_book.last_update_id;
+            if !(ev.first_update_id <= lub && ev.last_update_id >= lub) {
+                warn!(
+                    symbol = %snap.symbol,
+                    snap_lub = lub,
+                    event_U = ev.first_update_id,
+                    event_u = ev.last_update_id,
+                    "Binance Futures: snapshot too old vs buffer, retrying"
+                );
+                bootstrap_failed = true;
+                break;
+            }
+            first_applied = true;
+        } else {
+            // Последующие events: pu == prev event.u (новый last_update_id).
+            if ev.prev_update_id != new_book.last_update_id {
+                warn!(
+                    symbol = %snap.symbol,
+                    local_lub = new_book.last_update_id,
+                    event_pu = ev.prev_update_id,
+                    "Binance Futures: buffered event chain broken, re-syncing"
+                );
+                bootstrap_failed = true;
+                break;
+            }
+        }
+        last_event_time = ev.event_time;
+        new_book.apply_diff(
+            ev.bids.iter().copied(),
+            ev.asks.iter().copied(),
+            ev.last_update_id,
+        );
+    }
+
+    if bootstrap_failed {
+        state.book = prev_book;
+        state.buffer.clear();
+        return;
+    }
+
+    info!(
+        symbol = %snap.symbol,
+        levels_bids = new_book.bids.len(),
+        levels_asks = new_book.asks.len(),
+        last_update_id = new_book.last_update_id,
+        was_resync = prev_book.last_update_id > 0,
+        "Binance Futures: local book initialized"
+    );
+    state.book = new_book;
+    state.resync_count = 0;
+
+    let ts = if last_event_time > 0 { last_event_time } else { 0 };
+    let ob = if prev_book.last_update_id > 0 {
+        let (bids, asks) = state.book.diff_against_prev(&prev_book, TOP_LEVELS);
+        OrderBook {
+            exchange: ExchangeId::BinanceFutures,
+            symbol: snap.symbol.clone(),
+            bids,
+            asks,
+            timestamp_ms: ts,
+            sequence: Some(state.book.last_update_id),
+        }
+    } else {
+        state.book.to_orderbook(
+            ExchangeId::BinanceFutures,
+            snap.symbol.clone(),
+            ts,
+            TOP_LEVELS,
+        )
+    };
+    let _ = out_tx.send(ob).await;
+}
+
+fn spawn_bootstrap(
+    symbol: Symbol,
+    rest: Arc<BinanceFuturesRest>,
+    snap_tx: mpsc::Sender<SnapshotMsg>,
+) {
+    tokio::spawn(async move {
+        let mut backoff = Duration::from_secs(1);
+        loop {
+            futures_limiter().acquire(DEPTH_WEIGHT).await;
+            match rest.orderbook(&symbol, 1000).await {
+                Ok(ob) => {
+                    let bids: Vec<(Decimal, Decimal)> =
+                        ob.bids.iter().map(|l| (l.price, l.qty)).collect();
+                    let asks: Vec<(Decimal, Decimal)> =
+                        ob.asks.iter().map(|l| (l.price, l.qty)).collect();
+                    let Some(seq) = ob.sequence else {
+                        warn!(symbol = %symbol, "Binance Futures snapshot missing sequence, retrying");
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                        continue;
+                    };
+                    let _ = snap_tx
+                        .send(SnapshotMsg {
+                            symbol,
+                            last_update_id: seq,
+                            bids,
+                            asks,
+                        })
+                        .await;
+                    return;
+                }
+                Err(e) => {
+                    warn!(symbol = %symbol, error = %e, backoff_ms = backoff.as_millis() as u64, "Binance Futures REST snapshot failed");
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(60));
+                }
+            }
+        }
+    });
+}
+
+fn parse_level(raw: &[String; 2]) -> Option<(Decimal, Decimal)> {
+    let price = Decimal::from_str(&raw[0]).ok()?;
+    let qty = Decimal::from_str(&raw[1]).ok()?;
+    Some((price, qty))
 }
 
 /// Stream real-time trades for multiple symbols, automatically

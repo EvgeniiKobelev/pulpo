@@ -310,8 +310,15 @@ pub struct BinanceFuturesWsDepthRaw {
     pub asks: Vec<[String; 2]>,
     #[serde(rename = "E")]
     pub event_time: u64,
+    /// First update ID in event.
+    #[serde(rename = "U", default)]
+    pub first_update_id: u64,
+    /// Final update ID in event.
     #[serde(rename = "u")]
     pub last_update_id: u64,
+    /// Final update ID in previous event. Futures uses pu == prev.u to chain events.
+    #[serde(rename = "pu", default)]
+    pub prev_update_id: u64,
 }
 
 impl BinanceFuturesWsDepthRaw {
