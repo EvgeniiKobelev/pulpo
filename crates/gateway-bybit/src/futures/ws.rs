@@ -144,7 +144,7 @@ pub async fn stream_orderbook(
     _config: &ExchangeConfig,
     symbol: &Symbol,
 ) -> Result<BoxStream<OrderBook>> {
-    let topic = format!("orderbook.50.{}", unified_to_bybit(symbol));
+    let topic = format!("orderbook.1000.{}", unified_to_bybit(symbol));
     let raw_stream = subscribe_and_stream(vec![topic]).await?;
 
     Ok(Box::pin(raw_stream.filter_map(|json| async move {
@@ -262,7 +262,7 @@ pub async fn stream_orderbooks_batch(
 ) -> Result<BoxStream<OrderBook>> {
     let topics: Vec<String> = symbols
         .iter()
-        .map(|s| format!("orderbook.50.{}", unified_to_bybit(s)))
+        .map(|s| format!("orderbook.1000.{}", unified_to_bybit(s)))
         .collect();
     let raw_stream = subscribe_and_stream(topics).await?;
 
