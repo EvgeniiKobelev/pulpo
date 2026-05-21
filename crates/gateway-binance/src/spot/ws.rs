@@ -15,8 +15,11 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
 
 /// Сколько уровней отдаём в каждом snapshot/diff emit'е.
-/// Binance REST `limit=1000` даёт 1000 уровней, этим и ограничиваем.
-const TOP_LEVELS: usize = 1000;
+/// LocalOrderBook хранит всю 1000-уровневую книгу (для корректного maintain'а
+/// diff'ов с qty=0), но в выходной стрим отправляем только top-200 — этого
+/// хватает для покрытия ±2% от mid на ликвидных USDT-парах, и сильно снижает
+/// CPU-нагрузку на density coordinator (он upsert'ит каждый уровень).
+const TOP_LEVELS: usize = 200;
 
 /// Максимальный размер буфера diff'ов на символ во время ожидания snapshot'а.
 /// При нормальном rate ~10 событий/сек, 600 событий = ~60 сек ожидания —

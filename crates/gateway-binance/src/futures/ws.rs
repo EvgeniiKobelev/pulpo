@@ -14,7 +14,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
 
-const TOP_LEVELS: usize = 1000;
+/// См. spot/ws.rs — top-200 уровней для emit, локальный maintain хранит всё.
+const TOP_LEVELS: usize = 200;
 const MAX_BUFFER: usize = 1024;
 /// `/fapi/v1/depth?limit=1000` weight.
 const DEPTH_WEIGHT: u32 = 20;
