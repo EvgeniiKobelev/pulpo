@@ -1,5 +1,5 @@
-use crate::local_book::LocalOrderBook;
 use crate::rate_limit::spot_limiter;
+use gateway_core::LocalOrderBook;
 use crate::spot::mapper::*;
 use crate::spot::rest::BinanceRest;
 use futures::{SinkExt, StreamExt};

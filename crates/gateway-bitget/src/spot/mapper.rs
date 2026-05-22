@@ -225,8 +225,13 @@ pub struct BitgetWsOrderBook {
     pub asks: Vec<[serde_json::Value; 2]>,
     pub bids: Vec<[serde_json::Value; 2]>,
     pub ts: String,
+    /// Текущий sequence id.
     #[serde(default)]
     pub seq: Option<u64>,
+    /// Предыдущий sequence id (используется в канале `books`: на snapshot pseq
+    /// отсутствует/0; на update pseq == seq предыдущего сообщения).
+    #[serde(default)]
+    pub pseq: Option<u64>,
 }
 
 impl BitgetWsOrderBook {
@@ -240,6 +245,20 @@ impl BitgetWsOrderBook {
             sequence: self.seq,
         }
     }
+}
+
+/// Парсер уровней с публичным доступом — используется LocalOrderBook'ом
+/// в ws.rs для применения diff'ов.
+pub fn parse_book_levels(raw: &[[serde_json::Value; 2]]) -> Vec<(Decimal, Decimal)> {
+    raw.iter()
+        .filter_map(|pair| {
+            let price = json_value_to_str(&pair[0])
+                .and_then(|s| Decimal::from_str(&s).ok())?;
+            let qty = json_value_to_str(&pair[1])
+                .and_then(|s| Decimal::from_str(&s).ok())?;
+            Some((price, qty))
+        })
+        .collect()
 }
 
 /// Parse a WS candle array: [ts, open, high, low, close, baseVol, quoteVol, usdtVol]

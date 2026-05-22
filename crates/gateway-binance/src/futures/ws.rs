@@ -1,6 +1,5 @@
 use crate::futures::mapper::*;
 use crate::futures::rest::BinanceFuturesRest;
-use crate::local_book::LocalOrderBook;
 use crate::rate_limit::futures_limiter;
 use futures::{SinkExt, StreamExt};
 use gateway_core::*;

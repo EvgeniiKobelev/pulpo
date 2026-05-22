@@ -1,22 +1,21 @@
-//! Локальный стакан per-символ для Binance Spot/Futures.
+//! Локальный стакан per-символ.
 //!
-//! Используется для maintain'а консистентного 1000-уровневого orderbook'а
-//! поверх @depth@100ms diff-стрима по стандартной схеме Binance:
+//! Используется gateway'ями для maintain'а консистентной локальной книги
+//! поверх diff-стрима по стандартной схеме (Binance/OKX/Bitget/Bybit):
 //!
 //! 1. Буферим WS diff-события.
-//! 2. Запрашиваем REST snapshot (limit=1000).
-//! 3. Отбрасываем буферизованные events до snapshot.lastUpdateId.
+//! 2. Получаем REST snapshot или WS-snapshot (зависит от биржи).
+//! 3. Отбрасываем буферизованные events до snapshot sequence id.
 //! 4. Применяем валидные diff'ы поверх локального стакана.
-//! 5. На разрывах sequence id → re-sync (заново REST snapshot).
+//! 5. На разрывах sequence id → re-sync.
 //!
 //! После maintain'а отдаём в выходной стрим:
-//! * на каждый WS diff — `OrderBook` с пришедшими уровнями (как было раньше,
-//!   но уже из консистентной локальной книги — qty=0 для удалений).
-//! * на initial sync — `OrderBook` со всеми top-1000 уровнями локальной книги.
+//! * на каждый WS diff — `OrderBook` с пришедшими уровнями (qty=0 для удалений).
+//! * на initial sync — `OrderBook` со всеми top-N уровнями локальной книги.
 //! * на re-sync — diff между старой и новой книгой
 //!   (удалённые уровни как qty=0, новые/изменённые с их qty).
 
-use gateway_core::{ExchangeId, Level, OrderBook, Symbol};
+use crate::{ExchangeId, Level, OrderBook, Symbol};
 use rust_decimal::Decimal;
 use std::collections::BTreeMap;
 

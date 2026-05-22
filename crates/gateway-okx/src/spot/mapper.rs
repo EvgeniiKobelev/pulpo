@@ -13,7 +13,13 @@ use std::str::FromStr;
 #[derive(Debug, Deserialize)]
 pub struct OkxResponse<T> {
     pub code: String,
+    #[serde(default)]
     pub msg: String,
+    /// `#[serde(default)]` — OKX иногда отвечает `{"code":"51000","msg":"..."}`
+    /// БЕЗ поля `data` (например при `sz` сверх лимита). Без `default` парсер
+    /// падал бы с `Parse error: error decoding response body` ещё до того,
+    /// как мы проверим `code`.
+    #[serde(default = "Vec::new")]
     pub data: Vec<T>,
 }
 
@@ -157,6 +163,11 @@ pub struct OkxOrderBookRaw {
     pub asks: Vec<Vec<String>>,
     pub bids: Vec<Vec<String>>,
     pub ts: String,
+    /// `seqId` присутствует в ответе `/api/v5/market/books-full` (макс sz=5000)
+    /// и в `/api/v5/market/books` (макс sz=400). Используется как
+    /// `OrderBook.sequence` чтобы coordinator мог сверять с WS-стримом.
+    #[serde(default, rename = "seqId")]
+    pub seq_id: Option<u64>,
 }
 
 impl OkxOrderBookRaw {
@@ -167,7 +178,7 @@ impl OkxOrderBookRaw {
             bids: parse_levels(&self.bids),
             asks: parse_levels(&self.asks),
             timestamp_ms: self.ts.parse().unwrap_or(0),
-            sequence: None,
+            sequence: self.seq_id,
         }
     }
 }
@@ -287,6 +298,11 @@ pub fn parse_kline_row(
 #[derive(Debug, Deserialize)]
 pub struct OkxWsBookMsg {
     pub arg: OkxWsArg,
+    /// `"snapshot"` — первое сообщение после subscribe (полный начальный
+    /// стакан). `"update"` — последующие дельты. Канал `books5` action не
+    /// возвращает, для него полем будет `None`.
+    #[serde(default)]
+    pub action: Option<String>,
     pub data: Vec<OkxWsBookData>,
 }
 
@@ -309,6 +325,11 @@ pub struct OkxWsBookData {
     pub checksum: Option<i64>,
     #[serde(default, rename = "seqId")]
     pub seq_id: Option<u64>,
+    /// Для канала `books`: `prevSeqId` идёт перед `seqId`. У первого snapshot'а
+    /// = -1, поэтому тип `i64`, а не `u64`. У повторных update'ов должно быть
+    /// равно `seqId` предыдущего сообщения — иначе gap → re-sync.
+    #[serde(default, rename = "prevSeqId")]
+    pub prev_seq_id: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -591,6 +612,7 @@ mod tests {
                 vec!["42999.9".into(), "1.2".into(), "0".into(), "5".into()],
             ],
             ts: "1700000000000".into(),
+            seq_id: Some(42),
         };
         let sym = Symbol::new("BTC", "USDT");
         let ob = raw.into_orderbook(ExchangeId::Okx, sym);
@@ -598,6 +620,18 @@ mod tests {
         assert_eq!(ob.bids.len(), 1);
         assert_eq!(ob.asks[0].price, dec!(43000.1));
         assert_eq!(ob.bids[0].price, dec!(42999.9));
+        assert_eq!(ob.sequence, Some(42));
+    }
+
+    /// Регрессионный тест: при превышении sz OKX возвращает только code+msg,
+    /// без поля data. С `#[serde(default)]` оно должно парситься как пустой Vec,
+    /// чтобы code != "0" вернул Err, а не Parse error.
+    #[test]
+    fn okx_response_without_data_field_parses_as_empty_vec() {
+        let body = r#"{"code":"51000","msg":"Parameter sz error."}"#;
+        let resp: OkxResponse<OkxOrderBookRaw> = serde_json::from_str(body).unwrap();
+        assert_eq!(resp.code, "51000");
+        assert!(resp.data.is_empty());
     }
 
     #[test]

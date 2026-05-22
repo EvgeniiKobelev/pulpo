@@ -84,11 +84,23 @@ impl OkxRest {
 
     // ----- Order Book -----
 
+    /// Берёт полный snapshot стакана с `seqId`.
+    ///
+    /// Используется эндпоинт `/api/v5/market/books-full` (макс sz=5000),
+    /// а не `/api/v5/market/books` (макс sz=400). Эмпирически: при sz>400
+    /// у `/books` OKX отвечает `{"code":"51000","msg":"Parameter sz error."}`
+    /// БЕЗ поля `data`, и старый парсер падал на этом. Новый OkxResponse
+    /// помечен `#[serde(default)]` на data, поэтому такие ответы корректно
+    /// возвращаются как `Vec::new()` → `code != "0"` → Err.
+    ///
+    /// Rate limit `/books-full`: 2 req/s per IP. Caller (rest_reconciler)
+    /// сам разносит запросы по интервалу.
     pub async fn orderbook(&self, symbol: &Symbol, depth: u16) -> Result<OrderBook> {
         let inst_id = unified_to_okx(symbol);
+        let sz = depth.min(5000);
         let url = format!(
-            "{}/api/v5/market/books?instId={}&sz={}",
-            self.base_url, inst_id, depth
+            "{}/api/v5/market/books-full?instId={}&sz={}",
+            self.base_url, inst_id, sz
         );
         let data: Vec<OkxOrderBookRaw> = self.fetch(&url).await?;
         let raw = data.into_iter().next().ok_or_else(|| GatewayError::Parse {

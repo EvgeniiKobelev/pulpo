@@ -76,22 +76,38 @@ impl OkxSwapRest {
 
     // ----- Order Book -----
 
+    /// Полный snapshot стакана для perp-swap через `/books-full` (макс sz=5000).
+    /// См. подробный комментарий в `spot/rest.rs::orderbook` — там пояснение
+    /// почему `/books` (макс sz=400) не подходит.
+    ///
+    /// **ctVal multiplier**: OKX SWAP отдаёт sz в числе контрактов; здесь мы
+    /// домножаем qty на ctVal (через кэш `ct_vals`), чтобы downstream
+    /// (density coordinator) видел уже base-currency qty и считал нотинал
+    /// `price × qty` в долларах правильно.
     pub async fn orderbook(&self, symbol: &Symbol, depth: u16) -> Result<OrderBook> {
         let inst_id = unified_to_okx_swap(symbol);
+        let sz = depth.min(5000);
         let url = format!(
-            "{}/api/v5/market/books?instId={}&sz={}",
-            self.base_url, inst_id, depth
+            "{}/api/v5/market/books-full?instId={}&sz={}",
+            self.base_url, inst_id, sz
         );
         let data: Vec<OkxWsBookData> = self.fetch(&url).await?;
         let raw = data.into_iter().next().ok_or_else(|| GatewayError::Parse {
             exchange: EXCHANGE,
             message: "empty orderbook response".into(),
         })?;
+        let ct_val = crate::futures::ct_vals::ct_val_for(symbol).await;
+        let scale = |levels: Vec<gateway_core::Level>| -> Vec<gateway_core::Level> {
+            levels
+                .into_iter()
+                .map(|l| gateway_core::Level::new(l.price, l.qty * ct_val))
+                .collect()
+        };
         Ok(OrderBook {
             exchange: EXCHANGE,
             symbol: symbol.clone(),
-            bids: parse_levels(&raw.bids),
-            asks: parse_levels(&raw.asks),
+            bids: scale(parse_levels(&raw.bids)),
+            asks: scale(parse_levels(&raw.asks)),
             timestamp_ms: raw.ts.parse().unwrap_or(0),
             sequence: raw.seq_id,
         })
