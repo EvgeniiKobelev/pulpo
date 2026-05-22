@@ -74,10 +74,25 @@ async fn subscribe_and_stream(
             let mut ping_interval = tokio::time::interval(Duration::from_secs(20));
             ping_interval.tick().await;
 
+            // Канал `books` OKX даёт snapshot 400 уровней + дельты, но как и
+            // на Bitget дельты приходят только для близких к mid уровней;
+            // дальние levels остаются stale в pulpo'шной LocalOrderBook.
+            // Принудительный re-subscribe раз в 5 мин → OKX отвечает
+            // свежим snapshot, diff_against_prev обновляет stale.
+            let mut resub_interval = tokio::time::interval(Duration::from_secs(300));
+            resub_interval.tick().await;
+
             loop {
                 tokio::select! {
                     _ = ping_interval.tick() => {
                         if write.send(Message::text("ping".to_string())).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ = resub_interval.tick() => {
+                        debug!("OKX spot WS: periodic resubscribe to refresh stale levels");
+                        let sub = serde_json::json!({"op":"subscribe","args":args.clone()});
+                        if write.send(Message::text(sub.to_string())).await.is_err() {
                             break;
                         }
                     }

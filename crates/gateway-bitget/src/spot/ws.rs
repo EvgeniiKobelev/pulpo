@@ -62,10 +62,27 @@ async fn subscribe_and_stream(
             let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
             ping_interval.tick().await;
 
+            // Bitget WS `books` отдаёт snapshot 200 уровней + дельты, но
+            // дельты приходят только для top-N где N меньше 200. Уровни за
+            // пределами этого N остаются stale в локальной книге pulpo
+            // навсегда (биржа их обновления просто не шлёт). Каждые 5 мин
+            // принудительно перезаписываемся — Bitget отвечает свежим
+            // snapshot, и stale-уровни в LocalOrderBook обновляются
+            // через diff_against_prev на pulpo'шной стороне.
+            let mut resub_interval = tokio::time::interval(Duration::from_secs(300));
+            resub_interval.tick().await; // первый тик мгновенный, скипаем
+
             loop {
                 tokio::select! {
                     _ = ping_interval.tick() => {
                         if write.send(Message::text("ping".to_string())).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ = resub_interval.tick() => {
+                        debug!("Bitget spot WS: periodic resubscribe to refresh stale levels");
+                        let sub = serde_json::json!({"op":"subscribe","args":args.clone()});
+                        if write.send(Message::text(sub.to_string())).await.is_err() {
                             break;
                         }
                     }

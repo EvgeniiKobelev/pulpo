@@ -58,44 +58,66 @@ async fn subscribe_and_stream(
         let mut backoff = Duration::from_secs(1);
 
         'outer: loop {
+            // См. spot/ws.rs — periodic re-subscribe для refresh stale levels.
+            let mut resub_interval = tokio::time::interval(Duration::from_secs(300));
+            resub_interval.tick().await;
+
             loop {
-                match read.next().await {
-                    Some(Ok(Message::Text(text))) => {
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                            if json.get("op").and_then(|v| v.as_str()) == Some("ping") {
-                                let pong = serde_json::json!({"op": "pong"});
-                                let _ = write.send(Message::text(pong.to_string())).await;
-                                continue;
-                            }
-                            if matches!(
-                                json.get("op").and_then(|v| v.as_str()),
-                                Some("subscribe") | Some("pong")
-                            ) {
-                                continue;
-                            }
-                            if json.get("topic").is_some()
-                                && tx.send(json).await.is_err()
-                            {
-                                break 'outer;
+                tokio::select! {
+                    _ = resub_interval.tick() => {
+                        debug!("Bybit Futures WS: periodic resubscribe to refresh stale levels");
+                        let mut all_ok = true;
+                        for chunk in topics.chunks(SUBSCRIBE_CHUNK) {
+                            let sub = serde_json::json!({"op":"subscribe","args":chunk});
+                            if write.send(Message::text(sub.to_string())).await.is_err() {
+                                all_ok = false;
+                                break;
                             }
                         }
+                        if !all_ok {
+                            break;
+                        }
                     }
-                    Some(Ok(Message::Ping(data))) => {
-                        let _ = write.send(Message::Pong(data)).await;
+                    msg_result = read.next() => {
+                        match msg_result {
+                            Some(Ok(Message::Text(text))) => {
+                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                                    if json.get("op").and_then(|v| v.as_str()) == Some("ping") {
+                                        let pong = serde_json::json!({"op": "pong"});
+                                        let _ = write.send(Message::text(pong.to_string())).await;
+                                        continue;
+                                    }
+                                    if matches!(
+                                        json.get("op").and_then(|v| v.as_str()),
+                                        Some("subscribe") | Some("pong")
+                                    ) {
+                                        continue;
+                                    }
+                                    if json.get("topic").is_some()
+                                        && tx.send(json).await.is_err()
+                                    {
+                                        break 'outer;
+                                    }
+                                }
+                            }
+                            Some(Ok(Message::Ping(data))) => {
+                                let _ = write.send(Message::Pong(data)).await;
+                            }
+                            Some(Ok(Message::Close(_))) => {
+                                warn!("Bybit Futures WS connection closed");
+                                break;
+                            }
+                            Some(Err(e)) => {
+                                warn!("Bybit Futures WS error: {}", e);
+                                break;
+                            }
+                            None => {
+                                warn!("Bybit Futures WS stream ended unexpectedly");
+                                break;
+                            }
+                            _ => {}
+                        }
                     }
-                    Some(Ok(Message::Close(_))) => {
-                        warn!("Bybit Futures WS connection closed");
-                        break;
-                    }
-                    Some(Err(e)) => {
-                        warn!("Bybit Futures WS error: {}", e);
-                        break;
-                    }
-                    None => {
-                        warn!("Bybit Futures WS stream ended unexpectedly");
-                        break;
-                    }
-                    _ => {}
                 }
             }
 
