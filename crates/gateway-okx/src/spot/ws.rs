@@ -24,9 +24,14 @@ const TOP_LEVELS: usize = 400;
 const MAX_BUFFER: usize = 1024;
 
 /// Максимум аргументов на одно WS-соединение. OKX публикует лимит 240,
-/// но держим консервативный 100 — у нас по 600+ символов на бирже,
-/// шардируется на 6 коннектов.
-const MAX_ARGS_PER_CONNECTION: usize = 100;
+/// но эмпирически при ≥100 args на ws-frame OKX каждые 10-15 секунд режет
+/// соединение `Connection reset without closing handshake`. С 40 args
+/// прод стабилен. У нас по 600+ символов → 15 коннектов на биржу.
+const MAX_ARGS_PER_CONNECTION: usize = 40;
+
+/// Задержка между запуском последовательных WS-шардов. При cold-start без
+/// этой паузы OKX режет половину соединений как rate-limited.
+const SHARD_STAGGER_MS: u64 = 500;
 
 // ---------------------------------------------------------------------------
 // Core helper
@@ -266,7 +271,10 @@ pub async fn stream_orderbooks_batch(
     let rest = Arc::new(OkxRest::new(config));
     let (out_tx, out_rx) = mpsc::channel::<OrderBook>(8192);
 
-    for chunk in all_args.chunks(MAX_ARGS_PER_CONNECTION) {
+    for (idx, chunk) in all_args.chunks(MAX_ARGS_PER_CONNECTION).enumerate() {
+        if idx > 0 {
+            tokio::time::sleep(Duration::from_millis(SHARD_STAGGER_MS)).await;
+        }
         let raw = subscribe_and_stream(WS_PUBLIC_URL, chunk.to_vec()).await?;
         let shard_tx = out_tx.clone();
         let shard_rest = rest.clone();

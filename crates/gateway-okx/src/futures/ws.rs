@@ -20,7 +20,9 @@ const EXCHANGE: ExchangeId = ExchangeId::Okx;
 /// См. spot/ws.rs — канал `books` отдаёт 400 уровней.
 const TOP_LEVELS: usize = 400;
 const MAX_BUFFER: usize = 1024;
-const MAX_ARGS_PER_CONNECTION: usize = 100;
+/// См. spot/ws.rs::MAX_ARGS_PER_CONNECTION — те же причины (эмпирически).
+const MAX_ARGS_PER_CONNECTION: usize = 40;
+const SHARD_STAGGER_MS: u64 = 500;
 
 // ---------------------------------------------------------------------------
 // Core helper — same pattern as spot ws
@@ -308,7 +310,10 @@ pub async fn stream_orderbooks_batch(
     let rest = Arc::new(OkxSwapRest::new(config));
     let (out_tx, out_rx) = mpsc::channel::<OrderBook>(8192);
 
-    for chunk in all_args.chunks(MAX_ARGS_PER_CONNECTION) {
+    for (idx, chunk) in all_args.chunks(MAX_ARGS_PER_CONNECTION).enumerate() {
+        if idx > 0 {
+            tokio::time::sleep(Duration::from_millis(SHARD_STAGGER_MS)).await;
+        }
         let raw = subscribe_and_stream(WS_PUBLIC_URL, chunk.to_vec()).await?;
         let shard_tx = out_tx.clone();
         let shard_rest = rest.clone();
