@@ -27,6 +27,8 @@ pub struct BinanceFuturesSymbolRaw {
     pub price_precision: u8,
     #[serde(rename = "quantityPrecision")]
     pub quantity_precision: u8,
+    #[serde(rename = "contractType", default)]
+    pub contract_type: Option<String>,
     #[serde(default)]
     pub filters: Vec<serde_json::Value>,
 }
@@ -36,6 +38,13 @@ impl BinanceFuturesExchangeInfoRaw {
         let symbols = self
             .symbols
             .into_iter()
+            // Drop non-PERPETUAL contracts: quarterly futures
+            // (CURRENT_QUARTER/NEXT_QUARTER) and TradFi perps
+            // (TRADIFI_PERPETUAL — stocks, ETFs, commodities like
+            // TSLAUSDT, QQQUSDT, XAUUSDT). They share the fapi
+            // exchangeInfo response but are not crypto perps and
+            // can't be subscribed to like normal symbols downstream.
+            .filter(|s| s.contract_type.as_deref() == Some("PERPETUAL"))
             .map(|s| {
                 let status = match s.status.as_str() {
                     "TRADING" => SymbolStatus::Trading,
@@ -738,6 +747,7 @@ mod tests {
                     "quoteAsset": "USDT",
                     "pricePrecision": 2,
                     "quantityPrecision": 3,
+                    "contractType": "PERPETUAL",
                     "filters": [
                         {"filterType": "LOT_SIZE", "minQty": "0.001"},
                         {"filterType": "PRICE_FILTER", "tickSize": "0.10"},
@@ -750,6 +760,7 @@ mod tests {
                     "quoteAsset": "USDT",
                     "pricePrecision": 2,
                     "quantityPrecision": 3,
+                    "contractType": "PERPETUAL",
                     "filters": []
                 }]
             }"#,
@@ -773,6 +784,60 @@ mod tests {
         let eth = &info.symbols[1];
         assert_eq!(eth.status, SymbolStatus::Halted);
         assert_eq!(eth.min_qty, None);
+    }
+
+    #[test]
+    fn test_futures_exchange_info_filters_non_perpetual() {
+        let raw: BinanceFuturesExchangeInfoRaw = serde_json::from_str(
+            r#"{
+                "symbols": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "status": "TRADING",
+                        "baseAsset": "BTC",
+                        "quoteAsset": "USDT",
+                        "pricePrecision": 2,
+                        "quantityPrecision": 3,
+                        "contractType": "PERPETUAL",
+                        "filters": []
+                    },
+                    {
+                        "symbol": "TSLAUSDT",
+                        "status": "TRADING",
+                        "baseAsset": "TSLA",
+                        "quoteAsset": "USDT",
+                        "pricePrecision": 2,
+                        "quantityPrecision": 3,
+                        "contractType": "TRADIFI_PERPETUAL",
+                        "filters": []
+                    },
+                    {
+                        "symbol": "BTCUSDT_250926",
+                        "status": "TRADING",
+                        "baseAsset": "BTC",
+                        "quoteAsset": "USDT",
+                        "pricePrecision": 2,
+                        "quantityPrecision": 3,
+                        "contractType": "CURRENT_QUARTER",
+                        "filters": []
+                    },
+                    {
+                        "symbol": "NOTYPEUSDT",
+                        "status": "TRADING",
+                        "baseAsset": "NOTYPE",
+                        "quoteAsset": "USDT",
+                        "pricePrecision": 2,
+                        "quantityPrecision": 3,
+                        "filters": []
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let info = raw.into_exchange_info();
+        assert_eq!(info.symbols.len(), 1);
+        assert_eq!(info.symbols[0].raw_symbol, "BTCUSDT");
     }
 
     #[test]
