@@ -269,7 +269,7 @@ cargo run -p gateway-manager --example multi_exchange
 
 | Exchange | Spot | Futures | REST | WebSocket | Batch WS |
 |---|---|---|---|---|---|
-| Binance | yes | yes | yes | yes | yes (combined stream) |
+| Binance | yes | yes¹ | yes | yes | yes (combined stream) |
 | Bitget | yes | yes | yes | yes | yes (multi-topic) |
 | Bybit | yes | yes | yes | yes | yes (multi-topic) |
 | OKX | yes | yes | yes | yes | yes (multi-topic) |
@@ -284,6 +284,14 @@ cargo run -p gateway-manager --example multi_exchange
 | Toobit | — | yes | yes | yes | yes (chunked) |
 | Bitunix | — | yes | yes | yes | yes (chunked) |
 | XT.com | — | yes | yes | yes | yes (chunked) |
+
+¹ **Binance Futures** — `exchange_info()` returns crypto perpetuals only.
+Quarterly futures (`CURRENT_QUARTER` / `NEXT_QUARTER`) and TradFi-style
+perpetuals (`TRADIFI_PERPETUAL` — stock, ETF and commodity perps such as
+`TSLAUSDT`, `AMZNUSDT`, `QQQUSDT`, `XAUUSDT`, `NATGASUSDT`) share the
+same `fapi/v1/exchangeInfo` response but are filtered out, since they
+follow a stock-market session and are not interchangeable with regular
+perp consumers downstream.
 
 ## Project Structure
 
