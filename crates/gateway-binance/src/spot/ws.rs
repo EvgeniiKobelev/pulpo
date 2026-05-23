@@ -311,7 +311,7 @@ struct SymbolState {
 impl SymbolState {
     fn new() -> Self {
         Self {
-            book: LocalOrderBook::new(),
+            book: LocalOrderBook::with_max_per_side(TOP_LEVELS),
             buffer: VecDeque::new(),
             bootstrap_in_flight: false,
             resync_count: 0,
@@ -483,7 +483,7 @@ async fn handle_snapshot(
     };
 
     // Устанавливаем новый snapshot.
-    let mut new_book = LocalOrderBook::new();
+    let mut new_book = LocalOrderBook::with_max_per_side(TOP_LEVELS);
     new_book.set_snapshot(
         snap.bids.iter().copied(),
         snap.asks.iter().copied(),

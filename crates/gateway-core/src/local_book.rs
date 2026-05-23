@@ -29,11 +29,47 @@ pub struct LocalOrderBook {
     pub last_update_id: u64,
     /// Готов ли стакан к emit'у (true после initial snapshot + validate).
     pub ready: bool,
+    /// Максимум уровней на сторону (0 = без лимита). После каждого
+    /// `apply_diff`/`set_snapshot` отбрасываются «дальние от mid» уровни:
+    /// для bids — с минимальной ценой (хуже всего), для asks — с
+    /// максимальной. Защищает от утечки памяти когда биржа шлёт уровни
+    /// далеко за актуальной зоной mid (типичный кейс для bitget/okx
+    /// `books`-каналов после долгого аптайма).
+    pub max_per_side: usize,
 }
 
 impl LocalOrderBook {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Создать книгу с фиксированным capacity на сторону.
+    pub fn with_max_per_side(max_per_side: usize) -> Self {
+        Self {
+            max_per_side,
+            ..Self::default()
+        }
+    }
+
+    /// Обрезать обе стороны до `max_per_side`. Для bids оставляем уровни
+    /// с самыми ВЫСОКИМИ ценами (ближайшие к mid сверху), для asks —
+    /// с самыми НИЗКИМИ.
+    fn trim(&mut self) {
+        if self.max_per_side == 0 {
+            return;
+        }
+        while self.bids.len() > self.max_per_side {
+            let Some((&p, _)) = self.bids.iter().next() else {
+                break;
+            };
+            self.bids.remove(&p);
+        }
+        while self.asks.len() > self.max_per_side {
+            let Some((&p, _)) = self.asks.iter().next_back() else {
+                break;
+            };
+            self.asks.remove(&p);
+        }
     }
 
     /// Установить состояние из REST snapshot. Перезаписывает всё.
@@ -57,6 +93,7 @@ impl LocalOrderBook {
         }
         self.last_update_id = last_update_id;
         self.ready = true;
+        self.trim();
     }
 
     /// Применить diff к локальной книге. qty=0 удаляет уровень.
@@ -82,6 +119,7 @@ impl LocalOrderBook {
             }
         }
         self.last_update_id = new_update_id;
+        self.trim();
     }
 
     /// Top-N уровней с обеих сторон.

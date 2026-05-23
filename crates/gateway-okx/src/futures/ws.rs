@@ -387,7 +387,7 @@ struct SymbolState {
 impl SymbolState {
     fn new() -> Self {
         Self {
-            book: LocalOrderBook::new(),
+            book: LocalOrderBook::with_max_per_side(TOP_LEVELS),
             last_seq: 0,
             buffer: VecDeque::new(),
             bootstrap_in_flight: false,
@@ -479,7 +479,7 @@ async fn handle_ws_event(
     let state = states.entry(symbol.clone()).or_insert_with(SymbolState::new);
 
     if action == "snapshot" {
-        let mut new_book = LocalOrderBook::new();
+        let mut new_book = LocalOrderBook::with_max_per_side(TOP_LEVELS);
         new_book.set_snapshot(bids.iter().copied(), asks.iter().copied(), seq_id);
 
         let prev_book = std::mem::take(&mut state.book);
@@ -592,7 +592,7 @@ async fn handle_snapshot(
     }
 
     let prev_book = std::mem::take(&mut state.book);
-    let mut new_book = LocalOrderBook::new();
+    let mut new_book = LocalOrderBook::with_max_per_side(TOP_LEVELS);
     new_book.set_snapshot(
         snap.bids.iter().copied(),
         snap.asks.iter().copied(),
