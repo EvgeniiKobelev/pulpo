@@ -26,7 +26,8 @@ const TOP_LEVELS: usize = 1000;
 /// Максимальный размер буфера diff'ов на символ во время ожидания snapshot'а.
 /// При нормальном rate ~10 событий/сек, 600 событий = ~60 сек ожидания —
 /// этого с запасом хватает на любой rate-limited bootstrap.
-const MAX_BUFFER: usize = 4096;
+// 4096→16384 (C): дольше bridging snapshot→live при re-sync под burst'ом.
+const MAX_BUFFER: usize = 16384;
 /// После стольких подряд неудачных bootstrap'ов считаем книгу безнадёжно
 /// протухшей и эмитим purge (qty=0 по ранее отданным уровням), чтобы
 /// downstream снял зомби, вместо показа их до следующего успешного re-sync.
@@ -84,7 +85,8 @@ async fn subscribe_and_stream(
             })?;
     }
 
-    let (tx, rx) = mpsc::channel::<serde_json::Value>(8192);
+    // 8192→32768 (C): больше запас Layer-1 relief-клапана до дропа depth-фрейма.
+    let (tx, rx) = mpsc::channel::<serde_json::Value>(32768);
 
     tokio::spawn(async move {
         let mut write = write;

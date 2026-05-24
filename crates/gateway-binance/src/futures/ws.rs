@@ -16,7 +16,9 @@ use tracing::{debug, info, warn};
 /// См. spot/ws.rs — отдаём 1000 уровней (всю поддерживаемую глубину
 /// LocalOrderBook'а), чтобы покрыть ±2% от mid на тонко-тиковых coins'ах.
 const TOP_LEVELS: usize = 1000;
-const MAX_BUFFER: usize = 4096;
+// 4096→16384 (C): дольше держим bridging-буфер между snapshot и live при
+// re-sync, не проваливая bootstrap под burst'ом reconnect-ов.
+const MAX_BUFFER: usize = 16384;
 /// После стольких подряд неудачных bootstrap'ов считаем книгу безнадёжно
 /// протухшей и эмитим purge (qty=0 по ранее отданным уровням), чтобы
 /// downstream снял зомби, вместо того чтобы показывать их до следующего
@@ -78,7 +80,10 @@ async fn subscribe_and_stream(
             })?;
     }
 
-    let (tx, rx) = mpsc::channel::<serde_json::Value>(8192);
+    // 8192→32768 (C): больше запас Layer-1 relief-клапана до дропа depth-фрейма
+    // при стале downstream. Дроп само-лечится через re-sync, но реже = меньше
+    // транзиторных зомби.
+    let (tx, rx) = mpsc::channel::<serde_json::Value>(32768);
 
     tokio::spawn(async move {
         let mut write = write;
