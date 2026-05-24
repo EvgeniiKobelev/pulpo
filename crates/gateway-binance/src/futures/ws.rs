@@ -16,7 +16,12 @@ use tracing::{debug, info, warn};
 /// См. spot/ws.rs — отдаём 1000 уровней (всю поддерживаемую глубину
 /// LocalOrderBook'а), чтобы покрыть ±2% от mid на тонко-тиковых coins'ах.
 const TOP_LEVELS: usize = 1000;
-const MAX_BUFFER: usize = 1024;
+const MAX_BUFFER: usize = 4096;
+/// После стольких подряд неудачных bootstrap'ов считаем книгу безнадёжно
+/// протухшей и эмитим purge (qty=0 по ранее отданным уровням), чтобы
+/// downstream снял зомби, вместо того чтобы показывать их до следующего
+/// успешного re-sync (на горячих символах — минуты).
+const PURGE_AFTER_FAILURES: u32 = 3;
 /// `/fapi/v1/depth?limit=1000` weight.
 const DEPTH_WEIGHT: u32 = 20;
 
@@ -73,12 +78,13 @@ async fn subscribe_and_stream(
             })?;
     }
 
-    let (tx, rx) = mpsc::channel::<serde_json::Value>(1024);
+    let (tx, rx) = mpsc::channel::<serde_json::Value>(8192);
 
     tokio::spawn(async move {
         let mut write = write;
         let mut read = read;
         let mut backoff = Duration::from_secs(1);
+        let mut dropped: u64 = 0;
         let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
         ping_interval.tick().await; // skip first immediate tick
 
@@ -93,8 +99,27 @@ async fn subscribe_and_stream(
                                     if json.get("result").is_some() && json.get("id").is_some() {
                                         continue;
                                     }
-                                    if tx.send(json).await.is_err() {
-                                        break 'outer;
+                                    // Layer 1: never block the read/ping loop on a slow
+                                    // downstream. Blocking here stalls pong replies →
+                                    // binance RSTs the connection → every symbol on it
+                                    // sequence-gaps at once → re-sync storm → stale-book
+                                    // zombies. Drop on full instead: pulpo's own sequence
+                                    // validation turns a dropped diff into a clean
+                                    // per-symbol re-sync (self-healing), no reset.
+                                    match tx.try_send(json) {
+                                        Ok(()) => {}
+                                        Err(mpsc::error::TrySendError::Full(_)) => {
+                                            dropped += 1;
+                                            if dropped % 1000 == 1 {
+                                                warn!(
+                                                    dropped,
+                                                    "Binance Futures WS: downstream full, dropping depth frame (will re-sync)"
+                                                );
+                                            }
+                                        }
+                                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                                            break 'outer;
+                                        }
                                     }
                                 }
                             }
@@ -317,6 +342,9 @@ struct SymbolState {
     buffer: VecDeque<BufferedDiff>,
     bootstrap_in_flight: bool,
     resync_count: u32,
+    /// Подряд проваленные bootstrap'ы с момента последнего успешного sync.
+    /// Используется для purge протухшей книги (Layer 2).
+    failed_bootstraps: u32,
 }
 
 impl SymbolState {
@@ -326,6 +354,7 @@ impl SymbolState {
             buffer: VecDeque::new(),
             bootstrap_in_flight: false,
             resync_count: 0,
+            failed_bootstraps: 0,
         }
     }
 }
@@ -524,6 +553,32 @@ async fn handle_snapshot(
     }
 
     if bootstrap_failed {
+        state.failed_bootstraps += 1;
+        // Layer 2: после нескольких подряд провалов книга безнадёжно
+        // протухла. Эмитим qty=0 по ранее отданным уровням, чтобы
+        // density-engine снял зомби (иначе он держит старый qty до
+        // следующего успешного re-sync). Покрываем только пересечение
+        // момента — purge один раз при достижении порога.
+        if state.failed_bootstraps == PURGE_AFTER_FAILURES && prev_book.last_update_id > 0 {
+            let empty = LocalOrderBook::with_max_per_side(TOP_LEVELS);
+            let (bids, asks) = empty.diff_against_prev(&prev_book, TOP_LEVELS);
+            if !bids.is_empty() || !asks.is_empty() {
+                warn!(
+                    symbol = %snap.symbol,
+                    failed = state.failed_bootstraps,
+                    "Binance Futures: purging stale book after repeated bootstrap failures"
+                );
+                let ob = OrderBook {
+                    exchange: ExchangeId::BinanceFutures,
+                    symbol: snap.symbol.clone(),
+                    bids,
+                    asks,
+                    timestamp_ms: 0,
+                    sequence: Some(prev_book.last_update_id),
+                };
+                let _ = out_tx.send(ob).await;
+            }
+        }
         state.book = prev_book;
         state.buffer.clear();
         return;
@@ -539,6 +594,7 @@ async fn handle_snapshot(
     );
     state.book = new_book;
     state.resync_count = 0;
+    state.failed_bootstraps = 0;
 
     let ts = if last_event_time > 0 { last_event_time } else { 0 };
     let ob = if prev_book.last_update_id > 0 {
@@ -645,4 +701,190 @@ pub async fn stream_trades_combined(
     }
 
     Ok(Box::pin(select_all))
+}
+
+#[cfg(test)]
+mod resync_tests {
+    //! Repro tests for the "moved wall zombie" (TON/USDT ask@1.7638 = 476k
+    //! while the real book had 3141.9 there, the wall having repriced to
+    //! 1.7650). These exercise `handle_snapshot` — the re-sync path — which
+    //! is the only emit path besides per-diff passthrough.
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    fn ston() -> Symbol {
+        Symbol::new("TON", "USDT")
+    }
+
+    /// Build a SymbolState whose book is *stale* (still has the old wall) and
+    /// marked not-ready — i.e. the exact state after a `sequence gap` is
+    /// detected (handle_ws_event sets `book.ready = false` but keeps data).
+    fn stale_state(last_update_id: u64) -> SymbolState {
+        let mut st = SymbolState::new();
+        st.book.set_snapshot(
+            vec![(dec!(1.7593), dec!(372.7))],
+            // The phantom wall the exchange already moved away from:
+            vec![(dec!(1.7594), dec!(514.1)), (dec!(1.7638), dec!(476833.3))],
+            last_update_id,
+        );
+        st.book.ready = false; // post-gap
+        st
+    }
+
+    /// A SUCCESSFUL re-sync (fresh REST snapshot, no buffered chain to bridge)
+    /// MUST emit a diff that corrects the moved wall down to its real qty.
+    /// This is the path that DOES kill the zombie — it works when bootstrap
+    /// succeeds.
+    #[tokio::test]
+    async fn resync_success_corrects_moved_wall() {
+        let mut states: HashMap<Symbol, SymbolState> = HashMap::new();
+        states.insert(ston(), stale_state(1000));
+
+        let (out_tx, mut out_rx) = mpsc::channel::<OrderBook>(16);
+
+        // Fresh REST: wall is gone from 1.7638 (only dust left), real 460k
+        // now sits at 1.7650.
+        let snap = SnapshotMsg {
+            symbol: ston(),
+            last_update_id: 2000,
+            bids: vec![(dec!(1.7593), dec!(372.7))],
+            asks: vec![
+                (dec!(1.7594), dec!(514.1)),
+                (dec!(1.7638), dec!(3141.9)),
+                (dec!(1.7650), dec!(459812.7)),
+            ],
+        };
+
+        handle_snapshot(snap, &mut states, &out_tx).await;
+
+        // Local book is now fresh.
+        let book = &states[&ston()].book;
+        assert_eq!(book.asks.get(&dec!(1.7638)), Some(&dec!(3141.9)));
+        assert!(book.ready);
+
+        // And downstream got a diff that carries the correction for 1.7638.
+        let ob = out_rx.try_recv().expect("expected a re-sync diff emit");
+        let corrected = ob.asks.iter().find(|l| l.price == dec!(1.7638));
+        assert_eq!(
+            corrected.map(|l| l.qty),
+            Some(dec!(3141.9)),
+            "successful re-sync must emit the corrected qty for the moved wall"
+        );
+    }
+
+    /// A FAILED re-sync (buffered chain broken — exactly the
+    /// "buffered event chain broken, re-syncing" warn we see flooding TON in
+    /// prod) restores the STALE book and emits NOTHING. The phantom wall
+    /// survives and downstream is never told the book went stale. This is the
+    /// window in which the zombie lives — and on hyper-active symbols these
+    /// failures repeat for minutes (1635 re-syncs / 30 min in prod).
+    #[tokio::test]
+    async fn resync_chain_broken_retains_stale_zombie() {
+        let mut states: HashMap<Symbol, SymbolState> = HashMap::new();
+        let mut st = stale_state(1000);
+        // Buffer: ev1 bridges the snapshot (U<=lub<=u), ev2 breaks the chain
+        // (pu != prev u) — the bootstrap aborts.
+        st.buffer.push_back(BufferedDiff {
+            first_update_id: 1000,
+            last_update_id: 1005,
+            prev_update_id: 999,
+            bids: vec![],
+            asks: vec![],
+            event_time: 1,
+        });
+        st.buffer.push_back(BufferedDiff {
+            first_update_id: 9000,
+            last_update_id: 9005,
+            prev_update_id: 9999, // != 1005 -> chain broken
+            bids: vec![],
+            asks: vec![],
+            event_time: 2,
+        });
+        states.insert(ston(), st);
+
+        let (out_tx, mut out_rx) = mpsc::channel::<OrderBook>(16);
+
+        // Fresh REST that WOULD have corrected the wall — but it's discarded.
+        let snap = SnapshotMsg {
+            symbol: ston(),
+            last_update_id: 1000,
+            bids: vec![(dec!(1.7593), dec!(372.7))],
+            asks: vec![(dec!(1.7638), dec!(3141.9)), (dec!(1.7650), dec!(459812.7))],
+        };
+
+        handle_snapshot(snap, &mut states, &out_tx).await;
+
+        // BUG: the stale phantom wall is still in the book...
+        let book = &states[&ston()].book;
+        assert_eq!(
+            book.asks.get(&dec!(1.7638)),
+            Some(&dec!(476833.3)),
+            "failed bootstrap restores the stale wall (zombie persists)"
+        );
+        // ...and NOTHING was emitted downstream to correct it.
+        assert!(
+            out_rx.try_recv().is_err(),
+            "failed bootstrap emits no diff — downstream keeps the zombie qty"
+        );
+    }
+
+    /// Layer 2: after PURGE_AFTER_FAILURES consecutive bootstrap failures, the
+    /// stale book is purged downstream (qty=0 for previously-emitted levels) so
+    /// density-engine drops the zombie instead of waiting for a re-sync that may
+    /// be minutes away on a hot symbol.
+    #[tokio::test]
+    async fn resync_purges_stale_book_after_repeated_failures() {
+        let mut states: HashMap<Symbol, SymbolState> = HashMap::new();
+        states.insert(ston(), stale_state(1000));
+
+        let (out_tx, mut out_rx) = mpsc::channel::<OrderBook>(16);
+
+        let mut purge: Option<OrderBook> = None;
+        for _ in 0..PURGE_AFTER_FAILURES {
+            // Re-arm a broken buffer each round (handle_snapshot clears it on fail).
+            {
+                let st = states.get_mut(&ston()).unwrap();
+                st.buffer.clear();
+                st.buffer.push_back(BufferedDiff {
+                    first_update_id: 1000,
+                    last_update_id: 1005,
+                    prev_update_id: 999,
+                    bids: vec![],
+                    asks: vec![],
+                    event_time: 1,
+                });
+                st.buffer.push_back(BufferedDiff {
+                    first_update_id: 9000,
+                    last_update_id: 9005,
+                    prev_update_id: 9999, // chain broken
+                    bids: vec![],
+                    asks: vec![],
+                    event_time: 2,
+                });
+            }
+            let snap = SnapshotMsg {
+                symbol: ston(),
+                last_update_id: 1000,
+                bids: vec![(dec!(1.7593), dec!(372.7))],
+                asks: vec![(dec!(1.7638), dec!(3141.9))],
+            };
+            handle_snapshot(snap, &mut states, &out_tx).await;
+            while let Ok(ob) = out_rx.try_recv() {
+                purge = Some(ob);
+            }
+        }
+
+        let purge = purge.expect("expected a purge emit after repeated failures");
+        let level = purge
+            .asks
+            .iter()
+            .find(|l| l.price == dec!(1.7638))
+            .expect("purge must cover the stale wall price");
+        assert_eq!(
+            level.qty,
+            Decimal::ZERO,
+            "purge must emit qty=0 to delete the stale wall downstream"
+        );
+        assert_eq!(states[&ston()].failed_bootstraps, PURGE_AFTER_FAILURES);
+    }
 }

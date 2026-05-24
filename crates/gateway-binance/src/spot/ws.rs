@@ -26,7 +26,11 @@ const TOP_LEVELS: usize = 1000;
 /// Максимальный размер буфера diff'ов на символ во время ожидания snapshot'а.
 /// При нормальном rate ~10 событий/сек, 600 событий = ~60 сек ожидания —
 /// этого с запасом хватает на любой rate-limited bootstrap.
-const MAX_BUFFER: usize = 1024;
+const MAX_BUFFER: usize = 4096;
+/// После стольких подряд неудачных bootstrap'ов считаем книгу безнадёжно
+/// протухшей и эмитим purge (qty=0 по ранее отданным уровням), чтобы
+/// downstream снял зомби, вместо показа их до следующего успешного re-sync.
+const PURGE_AFTER_FAILURES: u32 = 3;
 
 /// REST endpoint weight за вызов `/api/v3/depth?limit=1000`.
 const DEPTH_WEIGHT: u32 = 20;
@@ -80,12 +84,13 @@ async fn subscribe_and_stream(
             })?;
     }
 
-    let (tx, rx) = mpsc::channel::<serde_json::Value>(1024);
+    let (tx, rx) = mpsc::channel::<serde_json::Value>(8192);
 
     tokio::spawn(async move {
         let mut write = write;
         let mut read = read;
         let mut backoff = Duration::from_secs(1);
+        let mut dropped: u64 = 0;
         let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
         ping_interval.tick().await; // skip first immediate tick
 
@@ -100,8 +105,25 @@ async fn subscribe_and_stream(
                                     if json.get("result").is_some() && json.get("id").is_some() {
                                         continue;
                                     }
-                                    if tx.send(json).await.is_err() {
-                                        break 'outer;
+                                    // Layer 1: never block the read/ping loop on a slow
+                                    // downstream — blocking stalls pongs → binance RST →
+                                    // mass re-sync storm → stale-book zombies. Drop on
+                                    // full; pulpo's sequence validation re-syncs the
+                                    // affected symbol cleanly (self-healing), no reset.
+                                    match tx.try_send(json) {
+                                        Ok(()) => {}
+                                        Err(mpsc::error::TrySendError::Full(_)) => {
+                                            dropped += 1;
+                                            if dropped % 1000 == 1 {
+                                                warn!(
+                                                    dropped,
+                                                    "Binance Spot WS: downstream full, dropping depth frame (will re-sync)"
+                                                );
+                                            }
+                                        }
+                                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                                            break 'outer;
+                                        }
                                     }
                                 }
                             }
@@ -306,6 +328,9 @@ struct SymbolState {
     bootstrap_in_flight: bool,
     /// Сколько раз подряд была re-sync (для exponential backoff log spam).
     resync_count: u32,
+    /// Подряд проваленные bootstrap'ы с момента последнего успешного sync
+    /// (для purge протухшей книги, Layer 2).
+    failed_bootstraps: u32,
 }
 
 impl SymbolState {
@@ -315,6 +340,7 @@ impl SymbolState {
             buffer: VecDeque::new(),
             bootstrap_in_flight: false,
             resync_count: 0,
+            failed_bootstraps: 0,
         }
     }
 }
@@ -529,6 +555,30 @@ async fn handle_snapshot(
     if bootstrap_failed {
         // Откатываем — оставляем книгу не-ready, перезапускаем bootstrap
         // на следующем WS event. resync_count++ уже в re-sync ветке.
+        state.failed_bootstraps += 1;
+        // Layer 2: после нескольких подряд провалов книга безнадёжно
+        // протухла — эмитим qty=0 по ранее отданным уровням, чтобы
+        // density-engine снял зомби (purge один раз при достижении порога).
+        if state.failed_bootstraps == PURGE_AFTER_FAILURES && prev_book.last_update_id > 0 {
+            let empty = LocalOrderBook::with_max_per_side(TOP_LEVELS);
+            let (bids, asks) = empty.diff_against_prev(&prev_book, TOP_LEVELS);
+            if !bids.is_empty() || !asks.is_empty() {
+                warn!(
+                    symbol = %snap.symbol,
+                    failed = state.failed_bootstraps,
+                    "Binance Spot: purging stale book after repeated bootstrap failures"
+                );
+                let ob = OrderBook {
+                    exchange: ExchangeId::BinanceSpot,
+                    symbol: snap.symbol.clone(),
+                    bids,
+                    asks,
+                    timestamp_ms: 0,
+                    sequence: Some(prev_book.last_update_id),
+                };
+                let _ = out_tx.send(ob).await;
+            }
+        }
         state.book = prev_book; // вернём prev (он не-ready)
         state.buffer.clear();
         return;
@@ -544,6 +594,7 @@ async fn handle_snapshot(
     );
     state.book = new_book;
     state.resync_count = 0;
+    state.failed_bootstraps = 0;
 
     // Emit полный snapshot/diff.
     let ts = if last_event_time > 0 { last_event_time } else { 0 };
