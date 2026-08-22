@@ -28,16 +28,22 @@ const MAX_ARGS_PER_CONNECTION: usize = 40;
 // Core helper
 // ---------------------------------------------------------------------------
 
+/// `periodic_resub` — принудительный re-subscribe каждые 5 мин. Нужен ТОЛЬКО
+/// каналу `books` (освежает stale-уровни, см. комментарий у resub_interval).
+/// На каналах `trade` Bitget в ответ на каждый subscribe шлёт снапшот
+/// последних трейдов (`action="snapshot"`) — на неликвидах это одни и те же
+/// трейды часами → дубли у потребителей (инцидент: ×1.1–1.6 строк в
+/// ClickHouse-истории, до 283 копий одного принта).
 async fn subscribe_and_stream(
     args: Vec<serde_json::Value>,
+    periodic_resub: bool,
 ) -> Result<BoxStream<serde_json::Value>> {
-    let (ws_stream, _) =
-        connect_async(WS_URL)
-            .await
-            .map_err(|e| GatewayError::WebSocket {
-                exchange: ExchangeId::BitgetSpot,
-                message: e.to_string(),
-            })?;
+    let (ws_stream, _) = connect_async(WS_URL)
+        .await
+        .map_err(|e| GatewayError::WebSocket {
+            exchange: ExchangeId::BitgetSpot,
+            message: e.to_string(),
+        })?;
 
     let (mut write, read) = ws_stream.split();
 
@@ -79,7 +85,7 @@ async fn subscribe_and_stream(
                             break;
                         }
                     }
-                    _ = resub_interval.tick() => {
+                    _ = resub_interval.tick(), if periodic_resub => {
                         debug!("Bitget spot WS: periodic resubscribe to refresh stale levels");
                         let sub = serde_json::json!({"op":"subscribe","args":args.clone()});
                         if write.send(Message::text(sub.to_string())).await.is_err() {
@@ -186,24 +192,28 @@ pub async fn stream_orderbook(
     stream_orderbooks_batch(config, std::slice::from_ref(symbol)).await
 }
 
-pub async fn stream_trades(
-    _config: &ExchangeConfig,
-    symbol: &Symbol,
-) -> Result<BoxStream<Trade>> {
+pub async fn stream_trades(_config: &ExchangeConfig, symbol: &Symbol) -> Result<BoxStream<Trade>> {
     let inst_id = unified_to_bitget(symbol);
     let arg = sub_arg("trade", &inst_id);
     let sym = symbol.clone();
-    let raw_stream = subscribe_and_stream(vec![arg]).await?;
+    let raw_stream = subscribe_and_stream(vec![arg], false).await?;
 
     Ok(Box::pin(
         futures::stream::unfold((raw_stream, sym), |(mut stream, sym)| async move {
             loop {
                 let json = stream.next().await?;
+                // `action="snapshot"` — повтор последних трейдов при (пере)подписке,
+                // не live-поток: эмитить нельзя, иначе дубли.
+                if json.get("action").and_then(|v| v.as_str()) == Some("snapshot") {
+                    continue;
+                }
                 let data = json.get("data")?;
                 if let Ok(trades) = serde_json::from_value::<Vec<BitgetWsTradeRaw>>(data.clone()) {
                     if !trades.is_empty() {
-                        let converted: Vec<Trade> =
-                            trades.into_iter().map(|t| t.into_trade(sym.clone())).collect();
+                        let converted: Vec<Trade> = trades
+                            .into_iter()
+                            .map(|t| t.into_trade(sym.clone()))
+                            .collect();
                         return Some((futures::stream::iter(converted), (stream, sym)));
                     }
                 }
@@ -222,7 +232,7 @@ pub async fn stream_candles(
     let channel = interval_to_bitget_ws(interval);
     let arg = sub_arg(channel, &inst_id);
     let sym = symbol.clone();
-    let raw_stream = subscribe_and_stream(vec![arg]).await?;
+    let raw_stream = subscribe_and_stream(vec![arg], false).await?;
 
     Ok(Box::pin(raw_stream.filter_map(move |json| {
         let sym = sym.clone();
@@ -274,7 +284,7 @@ pub async fn stream_orderbooks_batch(
     let (out_tx, out_rx) = mpsc::channel::<OrderBook>(8192);
 
     for chunk in all_args.chunks(MAX_ARGS_PER_CONNECTION) {
-        let raw = subscribe_and_stream(chunk.to_vec()).await?;
+        let raw = subscribe_and_stream(chunk.to_vec(), true).await?;
         let shard_tx = out_tx.clone();
         let shard_rest = rest.clone();
         tokio::spawn(maintain_shard(raw, shard_tx, shard_rest));
@@ -296,11 +306,15 @@ pub async fn stream_trades_batch(
             .iter()
             .map(|s| sub_arg("trade", &unified_to_bitget(s)))
             .collect();
-        let raw_stream = subscribe_and_stream(args).await?;
+        let raw_stream = subscribe_and_stream(args, false).await?;
         let chunk_stream: BoxStream<Trade> = Box::pin(
             futures::stream::unfold(raw_stream, |mut stream| async move {
                 loop {
                     let json = stream.next().await?;
+                    // Снапшот последних трейдов при (пере)подписке — не эмитим (дубли).
+                    if json.get("action").and_then(|v| v.as_str()) == Some("snapshot") {
+                        continue;
+                    }
                     let arg = json.get("arg")?;
                     let inst_id = arg.get("instId")?.as_str()?;
                     let symbol = bitget_symbol_to_unified(inst_id);
@@ -406,10 +420,7 @@ async fn handle_ws_event(
         .ok_or("no instId")?;
     let symbol = bitget_symbol_to_unified(inst_id);
 
-    let action = json
-        .get("action")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let action = json.get("action").and_then(|v| v.as_str()).unwrap_or("");
 
     let data_arr = json
         .get("data")
@@ -425,7 +436,9 @@ async fn handle_ws_event(
     let seq = book_data.seq.ok_or("no seq")?;
     let pseq = book_data.pseq.unwrap_or(0);
 
-    let state = states.entry(symbol.clone()).or_insert_with(SymbolState::new);
+    let state = states
+        .entry(symbol.clone())
+        .or_insert_with(SymbolState::new);
 
     if action == "snapshot" {
         let mut new_book = LocalOrderBook::with_max_per_side(TOP_LEVELS);
@@ -511,7 +524,9 @@ async fn handle_ws_event(
         return Ok(());
     }
 
-    state.book.apply_diff(bids.iter().copied(), asks.iter().copied(), seq);
+    state
+        .book
+        .apply_diff(bids.iter().copied(), asks.iter().copied(), seq);
     state.last_seq = seq;
 
     let ob = OrderBook {
@@ -557,11 +572,7 @@ async fn handle_snapshot(
             continue;
         }
         last_event_time = ev.event_time;
-        new_book.apply_diff(
-            ev.bids.iter().copied(),
-            ev.asks.iter().copied(),
-            ev.seq,
-        );
+        new_book.apply_diff(ev.bids.iter().copied(), ev.asks.iter().copied(), ev.seq);
     }
 
     info!(
@@ -576,7 +587,11 @@ async fn handle_snapshot(
     state.book = new_book;
     state.resync_count = 0;
 
-    let ts = if last_event_time > 0 { last_event_time } else { 0 };
+    let ts = if last_event_time > 0 {
+        last_event_time
+    } else {
+        0
+    };
     let ob = if prev_book.last_update_id > 0 {
         let (bids, asks) = state.book.diff_against_prev(&prev_book, TOP_LEVELS);
         OrderBook {
@@ -595,11 +610,7 @@ async fn handle_snapshot(
     let _ = out_tx.send(ob).await;
 }
 
-fn spawn_bootstrap(
-    symbol: Symbol,
-    rest: Arc<BitgetRest>,
-    snap_tx: mpsc::Sender<SnapshotMsg>,
-) {
+fn spawn_bootstrap(symbol: Symbol, rest: Arc<BitgetRest>, snap_tx: mpsc::Sender<SnapshotMsg>) {
     tokio::spawn(async move {
         let mut backoff = Duration::from_secs(1);
         loop {
