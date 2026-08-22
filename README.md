@@ -51,7 +51,7 @@ Write your trading logic once — run it on Binance, Bitget, Bybit, OKX, Gate.io
 | `gateway-okx` | OKX Spot & Futures — REST + WebSocket |
 | `gateway-gate` | Gate.io Spot & Futures — REST + WebSocket |
 | `gateway-mexc` | MEXC Spot & Futures — REST + WebSocket (protobuf) |
-| `gateway-kucoin` | KuCoin Spot — REST + WebSocket |
+| `gateway-kucoin` | KuCoin Spot & Futures — REST + WebSocket |
 | `gateway-lighter` | Lighter DEX Futures — REST + WebSocket |
 | `gateway-asterdex` | AsterDEX Futures — REST + WebSocket |
 | `gateway-hyperliquid` | Hyperliquid Futures — REST + WebSocket |
@@ -275,7 +275,7 @@ cargo run -p gateway-manager --example multi_exchange
 | OKX | yes | yes | yes | yes | yes (multi-topic) |
 | Gate.io | yes | yes | yes | yes | yes (multi-topic) |
 | MEXC | yes | yes | yes | yes | yes (multi-topic) |
-| KuCoin | yes | — | yes | yes | yes (multi-topic) |
+| KuCoin | yes | yes | yes | yes | yes (multi-topic) |
 | Lighter | — | yes | yes | yes | yes (chunked) |
 | AsterDEX | — | yes | yes | yes | yes (chunked) |
 | Hyperliquid | — | yes | yes | yes | yes (chunked) |
@@ -285,13 +285,16 @@ cargo run -p gateway-manager --example multi_exchange
 | Bitunix | — | yes | yes | yes | yes (chunked) |
 | XT.com | — | yes | yes | yes | yes (chunked) |
 
-¹ **Binance Futures** — `exchange_info()` returns crypto perpetuals only.
-Quarterly futures (`CURRENT_QUARTER` / `NEXT_QUARTER`) and TradFi-style
-perpetuals (`TRADIFI_PERPETUAL` — stock, ETF and commodity perps such as
-`TSLAUSDT`, `AMZNUSDT`, `QQQUSDT`, `XAUUSDT`, `NATGASUSDT`) share the
-same `fapi/v1/exchangeInfo` response but are filtered out, since they
-follow a stock-market session and are not interchangeable with regular
-perp consumers downstream.
+¹ **Binance Futures** — `exchange_info()` returns crypto perpetuals only
+by default. Quarterly futures (`CURRENT_QUARTER` / `NEXT_QUARTER`) and
+TradFi-style perpetuals (`TRADIFI_PERPETUAL` — stock, ETF and commodity
+perps such as `TSLAUSDT`, `AMZNUSDT`, `QQQUSDT`, `XAUUSDT`, `NATGASUSDT`)
+share the same `fapi/v1/exchangeInfo` response but are filtered out, since
+they follow a stock-market session and are not interchangeable with
+regular perp consumers downstream. Consumers that need every perp on the
+venue (e.g. trade-history ingest) opt in with
+`BinanceFutures::public().with_contract_filter(ContractFilter::AllPerpetuals)`;
+quarterlies are never returned.
 
 ## Project Structure
 

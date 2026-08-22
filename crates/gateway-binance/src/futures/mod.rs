@@ -5,19 +5,35 @@ pub mod ws;
 use async_trait::async_trait;
 use gateway_core::*;
 
+pub use mapper::ContractFilter;
+
 pub struct BinanceFutures {
     config: ExchangeConfig,
     rest: rest::BinanceFuturesRest,
+    /// Which contract types `exchange_info()` returns. Default —
+    /// crypto perps only; see [`ContractFilter`].
+    contract_filter: ContractFilter,
 }
 
 impl BinanceFutures {
     pub fn new(config: ExchangeConfig) -> Self {
         let rest = rest::BinanceFuturesRest::new(&config);
-        Self { config, rest }
+        Self {
+            config,
+            rest,
+            contract_filter: ContractFilter::default(),
+        }
     }
 
     pub fn public() -> Self {
         Self::new(ExchangeConfig::default())
+    }
+
+    /// Include TradFi perps (`TRADIFI_PERPETUAL`: stocks, ETFs, commodities)
+    /// in `exchange_info()`. Quarterly futures stay excluded either way.
+    pub fn with_contract_filter(mut self, filter: ContractFilter) -> Self {
+        self.contract_filter = filter;
+        self
     }
 }
 
@@ -32,7 +48,7 @@ impl Exchange for BinanceFutures {
     }
 
     async fn exchange_info(&self) -> Result<ExchangeInfo> {
-        self.rest.exchange_info().await
+        self.rest.exchange_info(self.contract_filter).await
     }
 
     async fn orderbook(&self, symbol: &Symbol, depth: u16) -> Result<OrderBook> {

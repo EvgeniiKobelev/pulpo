@@ -22,7 +22,7 @@ impl BinanceFuturesRest {
     }
 
     /// GET /fapi/v1/exchangeInfo
-    pub async fn exchange_info(&self) -> Result<ExchangeInfo> {
+    pub async fn exchange_info(&self, filter: ContractFilter) -> Result<ExchangeInfo> {
         let url = format!("{}/fapi/v1/exchangeInfo", self.base_url);
         let resp = self.client.get(&url).send().await.map_err(|e| {
             GatewayError::Rest {
@@ -48,7 +48,7 @@ impl BinanceFuturesRest {
                 message: e.to_string(),
             }
         })?;
-        Ok(raw.into_exchange_info())
+        Ok(raw.into_exchange_info_filtered(filter))
     }
 
     /// GET /fapi/v1/depth?symbol={}&limit={}
