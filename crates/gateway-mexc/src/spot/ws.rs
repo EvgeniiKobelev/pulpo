@@ -14,6 +14,14 @@ use tracing::{debug, info, warn};
 const WS_URL: &str = "wss://wbs-api.mexc.com/ws";
 const EXCHANGE: ExchangeId = ExchangeId::Mexc;
 
+/// MEXC spot WS принимает не больше 30 подписок на одно соединение: на 31+
+/// каналов сервер подписывает первые 30 и отвечает «Exceeded maximum
+/// subscription limit!», а слишком длинное сообщение (~200 каналов) целиком
+/// отбрасывает с «msg length invalid». Поэтому батч режется на соединения
+/// по `MAX_SUBS_PER_CONN` каналов (проверено: 57 параллельных соединений с
+/// одного IP подписываются без отказов).
+const MAX_SUBS_PER_CONN: usize = 30;
+
 // ---------------------------------------------------------------------------
 // Core helpers
 // ---------------------------------------------------------------------------
@@ -92,10 +100,7 @@ fn decode_push(data: &[u8]) -> DecodedMsg {
 // WebSocket connection loop
 // ---------------------------------------------------------------------------
 
-async fn run_ws_loop(
-    channels: Vec<String>,
-    tx: mpsc::Sender<DecodedMsg>,
-) {
+async fn run_ws_loop(channels: Vec<String>, tx: mpsc::Sender<DecodedMsg>) {
     let mut backoff = Duration::from_secs(1);
 
     loop {
@@ -149,9 +154,14 @@ async fn run_ws_loop(
                             }
                         }
                         Some(Ok(Message::Text(text))) => {
-                            // Control messages (sub confirmation, pong) come as text
-                            if text.contains("Blocked") {
-                                warn!("MEXC WS blocked: {text}");
+                            // Control messages (sub confirmation, pong) come as text.
+                            // Отказ подписки MEXC отдаёт с code=0, отличить можно
+                            // только по тексту — иначе недоподписка невидима.
+                            if text.contains("Blocked")
+                                || text.contains("Exceeded")
+                                || text.contains("invalid")
+                            {
+                                warn!("MEXC WS subscribe rejected: {text}");
                             }
                         }
                         Some(Ok(Message::Ping(data))) => {
@@ -184,15 +194,25 @@ async fn run_ws_loop(
     debug!("MEXC WS loop ended");
 }
 
-/// Spawn a WS connection and return a stream of decoded protobuf messages.
-fn subscribe_and_stream(
-    channels: Vec<String>,
-) -> mpsc::Receiver<DecodedMsg> {
+/// Spawn WS connections (one per `MAX_SUBS_PER_CONN` channels) and return a
+/// single stream of decoded protobuf messages merged from all of them.
+fn subscribe_and_stream(channels: Vec<String>) -> mpsc::Receiver<DecodedMsg> {
     let (tx, rx) = mpsc::channel::<DecodedMsg>(1024);
-    tokio::spawn(async move {
-        run_ws_loop(channels, tx).await;
-    });
+    for chunk in chunk_channels(channels) {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            run_ws_loop(chunk, tx).await;
+        });
+    }
     rx
+}
+
+/// Режет список каналов на куски, помещающиеся в одно соединение.
+fn chunk_channels(channels: Vec<String>) -> Vec<Vec<String>> {
+    channels
+        .chunks(MAX_SUBS_PER_CONN)
+        .map(|c| c.to_vec())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -296,10 +316,7 @@ pub async fn stream_orderbook(
     Ok(Box::pin(ReceiverStream::new(rx_out)))
 }
 
-pub async fn stream_trades(
-    _config: &ExchangeConfig,
-    symbol: &Symbol,
-) -> Result<BoxStream<Trade>> {
+pub async fn stream_trades(_config: &ExchangeConfig, symbol: &Symbol) -> Result<BoxStream<Trade>> {
     let pair = unified_to_mexc(symbol);
     let channel = format!("spot@public.aggre.deals.v3.api.pb@100ms@{pair}");
     let sym = symbol.clone();
@@ -362,7 +379,12 @@ pub async fn stream_orderbooks_batch(
     }
     let channels: Vec<String> = symbols
         .iter()
-        .map(|sym| format!("spot@public.aggre.depth.v3.api.pb@100ms@{}", unified_to_mexc(sym)))
+        .map(|sym| {
+            format!(
+                "spot@public.aggre.depth.v3.api.pb@100ms@{}",
+                unified_to_mexc(sym)
+            )
+        })
         .collect();
     let mut rx = subscribe_and_stream(channels);
 
@@ -396,17 +418,19 @@ pub async fn stream_trades_batch(
     }
     let channels: Vec<String> = symbols
         .iter()
-        .map(|sym| format!("spot@public.aggre.deals.v3.api.pb@100ms@{}", unified_to_mexc(sym)))
+        .map(|sym| {
+            format!(
+                "spot@public.aggre.deals.v3.api.pb@100ms@{}",
+                unified_to_mexc(sym)
+            )
+        })
         .collect();
     let mut rx = subscribe_and_stream(channels);
 
     let (tx_out, rx_out) = mpsc::channel::<Trade>(256);
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if let DecodedMsg::Deals {
-                symbol, deals, ..
-            } = msg
-            {
+            if let DecodedMsg::Deals { symbol, deals, .. } = msg {
                 let sym = mexc_to_unified(&symbol);
                 for item in &deals.deals {
                     let trade = pb_deal_to_trade(item, sym.clone());
@@ -419,4 +443,29 @@ pub async fn stream_trades_batch(
     });
 
     Ok(Box::pin(ReceiverStream::new(rx_out)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_channels_respects_per_connection_limit() {
+        let channels: Vec<String> = (0..1705).map(|i| format!("ch{i}")).collect();
+        let chunks = chunk_channels(channels.clone());
+        assert_eq!(chunks.len(), 57);
+        assert!(chunks.iter().all(|c| c.len() <= MAX_SUBS_PER_CONN));
+        assert_eq!(chunks.last().map(Vec::len), Some(25));
+        let flat: Vec<String> = chunks.into_iter().flatten().collect();
+        assert_eq!(flat, channels);
+    }
+
+    #[test]
+    fn chunk_channels_small_and_empty() {
+        assert_eq!(
+            chunk_channels(vec!["a".into()]),
+            vec![vec!["a".to_string()]]
+        );
+        assert!(chunk_channels(Vec::new()).is_empty());
+    }
 }
