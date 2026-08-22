@@ -33,18 +33,44 @@ pub struct BinanceFuturesSymbolRaw {
     pub filters: Vec<serde_json::Value>,
 }
 
+/// Which `contractType`s from `fapi/v1/exchangeInfo` make it into
+/// `ExchangeInfo`. Quarterly futures (`CURRENT_QUARTER`/`NEXT_QUARTER`)
+/// are never included — they have an expiry and aren't perps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ContractFilter {
+    /// Crypto perpetuals only (`PERPETUAL`). Default: TradFi perps follow a
+    /// stock-market session and aren't interchangeable with regular perp
+    /// consumers downstream.
+    #[default]
+    CryptoPerpetuals,
+    /// `PERPETUAL` + `TRADIFI_PERPETUAL` (stocks, ETFs, commodities such as
+    /// TSLAUSDT, QQQUSDT, XAUUSDT) — for consumers that store/inspect every
+    /// perp on the venue, e.g. trade-history ingest.
+    AllPerpetuals,
+}
+
+impl ContractFilter {
+    fn accepts(self, contract_type: Option<&str>) -> bool {
+        match (self, contract_type) {
+            (_, Some("PERPETUAL")) => true,
+            (ContractFilter::AllPerpetuals, Some("TRADIFI_PERPETUAL")) => true,
+            // Quarterlies, unknown types and symbols without contractType
+            // (unexpected for fapi) — fail closed.
+            _ => false,
+        }
+    }
+}
+
 impl BinanceFuturesExchangeInfoRaw {
     pub fn into_exchange_info(self) -> ExchangeInfo {
+        self.into_exchange_info_filtered(ContractFilter::default())
+    }
+
+    pub fn into_exchange_info_filtered(self, filter: ContractFilter) -> ExchangeInfo {
         let symbols = self
             .symbols
             .into_iter()
-            // Drop non-PERPETUAL contracts: quarterly futures
-            // (CURRENT_QUARTER/NEXT_QUARTER) and TradFi perps
-            // (TRADIFI_PERPETUAL — stocks, ETFs, commodities like
-            // TSLAUSDT, QQQUSDT, XAUUSDT). They share the fapi
-            // exchangeInfo response but are not crypto perps and
-            // can't be subscribed to like normal symbols downstream.
-            .filter(|s| s.contract_type.as_deref() == Some("PERPETUAL"))
+            .filter(|s| filter.accepts(s.contract_type.as_deref()))
             .map(|s| {
                 let status = match s.status.as_str() {
                     "TRADING" => SymbolStatus::Trading,
@@ -838,6 +864,21 @@ mod tests {
         let info = raw.into_exchange_info();
         assert_eq!(info.symbols.len(), 1);
         assert_eq!(info.symbols[0].raw_symbol, "BTCUSDT");
+    }
+
+    #[test]
+    fn test_contract_filter_all_perpetuals_keeps_tradifi_drops_quarterlies() {
+        let f = ContractFilter::AllPerpetuals;
+        assert!(f.accepts(Some("PERPETUAL")));
+        assert!(f.accepts(Some("TRADIFI_PERPETUAL")));
+        assert!(!f.accepts(Some("CURRENT_QUARTER")));
+        assert!(!f.accepts(Some("NEXT_QUARTER")));
+        assert!(!f.accepts(None));
+
+        let d = ContractFilter::CryptoPerpetuals;
+        assert!(d.accepts(Some("PERPETUAL")));
+        assert!(!d.accepts(Some("TRADIFI_PERPETUAL")));
+        assert_eq!(ContractFilter::default(), d);
     }
 
     #[test]
