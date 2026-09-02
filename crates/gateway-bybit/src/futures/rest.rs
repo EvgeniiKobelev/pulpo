@@ -4,6 +4,15 @@ use reqwest::Client;
 
 const BASE_URL: &str = "https://api.bybit.com";
 
+/// Max page size accepted by `GET /v5/market/instruments-info`.
+const INSTRUMENTS_PAGE_LIMIT: u16 = 1000;
+
+/// Safety cap on `instruments-info` pagination.
+///
+/// At 1000 instruments per page this is far above the real instrument count;
+/// it only guards against an endless loop if the API ever repeats a cursor.
+const INSTRUMENTS_MAX_PAGES: usize = 10;
+
 pub struct BybitLinearRest {
     client: Client,
     base_url: String,
@@ -62,13 +71,66 @@ impl BybitLinearRest {
         Ok(wrapper.result)
     }
 
-    /// GET /v5/market/instruments-info?category=linear
+    /// GET /v5/market/instruments-info?category=linear&limit=1000[&cursor=...]
+    ///
+    /// The endpoint is paginated: without `limit` it returns only 500 entries
+    /// while Bybit lists ~850 linear instruments, silently truncating the list
+    /// (SOLUSDT, XRPUSDT and friends went missing). We request the maximum page
+    /// size and follow `nextPageCursor` until it comes back empty or absent,
+    /// capped at [`INSTRUMENTS_MAX_PAGES`] pages. The cursor is already
+    /// percent-encoded by the API and is passed through as-is.
     pub async fn exchange_info(&self) -> Result<ExchangeInfo> {
-        let url = format!(
-            "{}/v5/market/instruments-info?category=linear",
-            self.base_url
+        let mut category = String::new();
+        let mut list = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut pages = 0usize;
+
+        for _ in 0..INSTRUMENTS_MAX_PAGES {
+            let mut url = format!(
+                "{}/v5/market/instruments-info?category=linear&limit={}",
+                self.base_url, INSTRUMENTS_PAGE_LIMIT
+            );
+            if let Some(c) = &cursor {
+                url.push_str("&cursor=");
+                url.push_str(c);
+            }
+
+            let page: BybitLinearInstrumentsResult = self.fetch(&url).await?;
+            pages += 1;
+            if category.is_empty() {
+                category = page.category;
+            }
+            list.extend(page.list);
+
+            match page.next_page_cursor {
+                Some(next) if !next.is_empty() => cursor = Some(next),
+                _ => {
+                    cursor = None;
+                    break;
+                }
+            }
+        }
+
+        if cursor.is_some() {
+            tracing::warn!(
+                pages,
+                instruments = list.len(),
+                "instruments-info: page cap reached, list may be truncated"
+            );
+        }
+
+        tracing::debug!(
+            exchange = "bybit_futures",
+            pages,
+            instruments = list.len(),
+            "fetched instruments-info"
         );
-        let result: BybitLinearInstrumentsResult = self.fetch(&url).await?;
+
+        let result = BybitLinearInstrumentsResult {
+            category,
+            list,
+            next_page_cursor: None,
+        };
         Ok(result.into_exchange_info())
     }
 
