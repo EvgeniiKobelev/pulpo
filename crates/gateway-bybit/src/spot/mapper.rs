@@ -24,6 +24,12 @@ pub struct BybitResponse<T> {
 pub struct BybitInstrumentsResult {
     pub category: String,
     pub list: Vec<BybitInstrumentRaw>,
+    /// Pagination cursor for the next page.
+    ///
+    /// Bybit returns an already percent-encoded string, an empty string on the
+    /// last page, and omits the field entirely for the `spot` category.
+    #[serde(rename = "nextPageCursor", default)]
+    pub next_page_cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -794,6 +800,39 @@ mod tests {
 
         let eth = &info.symbols[1];
         assert_eq!(eth.status, SymbolStatus::PreTrading);
+    }
+
+    #[test]
+    fn test_instruments_next_page_cursor() {
+        let cursor_of = |json: &str| {
+            serde_json::from_str::<BybitResponse<BybitInstrumentsResult>>(json)
+                .unwrap()
+                .result
+                .next_page_cursor
+        };
+
+        // More pages follow: the cursor arrives already percent-encoded.
+        assert_eq!(
+            cursor_of(
+                r#"{"retCode":0,"retMsg":"OK","result":{"category":"spot","list":[],
+                    "nextPageCursor":"first%3DBTCUSDT%26last%3DZRXUSDT"}}"#
+            ),
+            Some("first%3DBTCUSDT%26last%3DZRXUSDT".to_string())
+        );
+
+        // Last page: an empty string, which the REST loop treats as the end.
+        assert_eq!(
+            cursor_of(
+                r#"{"retCode":0,"retMsg":"OK","result":{"category":"spot","list":[],"nextPageCursor":""}}"#
+            ),
+            Some(String::new())
+        );
+
+        // Spot omits the field entirely today.
+        assert_eq!(
+            cursor_of(r#"{"retCode":0,"retMsg":"OK","result":{"category":"spot","list":[]}}"#),
+            None
+        );
     }
 
     #[test]
