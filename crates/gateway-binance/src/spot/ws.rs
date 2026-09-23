@@ -647,6 +647,10 @@ fn spawn_bootstrap(
                 return;
             }
             spot_limiter().acquire(DEPTH_WEIGHT).await;
+            // Пока стояли в очереди лимитера, шард мог выйти — не тратим вес.
+            if snap_tx.is_closed() {
+                return;
+            }
             match rest.orderbook(&symbol, 1000).await {
                 Ok(ob) => {
                     let bids: Vec<(Decimal, Decimal)> =
