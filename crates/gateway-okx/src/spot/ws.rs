@@ -84,6 +84,8 @@ async fn subscribe_and_stream(
 
             loop {
                 tokio::select! {
+                    // Потребитель бросил стрим — закрываем соединение сразу.
+                    _ = tx.closed() => break 'outer,
                     _ = ping_interval.tick() => {
                         if write.send(Message::text("ping".to_string())).await.is_err() {
                             break;
@@ -383,6 +385,13 @@ async fn maintain_shard(
     loop {
         tokio::select! {
             biased;
+            // Выход закрыт (потребитель бросил стрим или combined-подписка
+            // не собралась) — шард выходит и дропает `raw`, сырой WS-таск
+            // закрывает соединение; иначе шард жил бы вечно с реконнектами.
+            _ = out_tx.closed() => {
+                debug!("OKX Spot maintain shard: consumer dropped");
+                return;
+            }
 
             ev = raw.next() => {
                 let Some(json) = ev else {
@@ -654,6 +663,10 @@ fn spawn_bootstrap(symbol: Symbol, rest: Arc<OkxRest>, snap_tx: mpsc::Sender<Sna
     tokio::spawn(async move {
         let mut backoff = Duration::from_secs(1);
         loop {
+            // Шард вышел — снапшот больше некому применять.
+            if snap_tx.is_closed() {
+                return;
+            }
             // depth=5000 → /books-full sz=5000 (2 req/s per IP). Caller
             // защищает от ddos'а самим фактом одного in-flight bootstrap'а
             // на символ; на параллельных гэпах OKX сам отвечает 429,

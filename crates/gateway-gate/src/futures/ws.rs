@@ -82,6 +82,8 @@ async fn subscribe_and_stream(
 
             loop {
                 tokio::select! {
+                    // Потребитель бросил стрим — закрываем соединение сразу.
+                    _ = tx.closed() => break 'outer,
                     _ = ping_interval.tick() => {
                         if write.send(Message::text(make_ping())).await.is_err() {
                             break;
@@ -307,6 +309,8 @@ pub async fn stream_orderbooks_batch(
 
             loop {
                 tokio::select! {
+                    // Потребитель бросил стрим — закрываем соединение сразу.
+                    _ = tx.closed() => break 'outer,
                     _ = ping_interval.tick() => {
                         if write.send(Message::text(make_ping())).await.is_err() {
                             break;
@@ -442,6 +446,8 @@ pub async fn stream_trades_batch(
 
             loop {
                 tokio::select! {
+                    // Потребитель бросил стрим — закрываем соединение сразу.
+                    _ = tx.closed() => break 'outer,
                     _ = ping_interval.tick() => {
                         if write.send(Message::text(make_ping())).await.is_err() {
                             break;

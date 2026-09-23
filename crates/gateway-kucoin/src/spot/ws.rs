@@ -128,6 +128,11 @@ async fn run_ws_loop(
         // ---- message loop ----
         loop {
             tokio::select! {
+                // Потребитель бросил стрим — закрываем соединение сразу.
+                _ = tx.closed() => {
+                    debug!("WS receiver dropped");
+                    return;
+                }
                 _ = ping_timer.tick() => {
                     if write.send(Message::text(make_ping())).await.is_err() {
                         warn!("KuCoin WS ping failed");
@@ -207,7 +212,7 @@ pub async fn stream_orderbook(
 
     let (tx_out, rx_out) = mpsc::channel::<OrderBook>(256);
     tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
+        while let Some(msg) = recv_while_open(&mut rx, &tx_out).await {
             if let Some(data) = msg.data {
                 if let Ok(depth) = serde_json::from_value::<KucoinWsDepthData>(data) {
                     let ob = depth.into_orderbook(sym.clone());
@@ -233,7 +238,7 @@ pub async fn stream_trades(
 
     let (tx_out, rx_out) = mpsc::channel::<Trade>(256);
     tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
+        while let Some(msg) = recv_while_open(&mut rx, &tx_out).await {
             if let Some(data) = msg.data {
                 if let Ok(trade_data) = serde_json::from_value::<KucoinWsTradeData>(data) {
                     let trade = trade_data.into_trade();
@@ -261,7 +266,7 @@ pub async fn stream_candles(
 
     let (tx_out, rx_out) = mpsc::channel::<Candle>(256);
     tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
+        while let Some(msg) = recv_while_open(&mut rx, &tx_out).await {
             if let Some(data) = msg.data {
                 if let Ok(candle_data) = serde_json::from_value::<KucoinWsCandleData>(data) {
                     if let Some(candle) = candle_data.into_candle() {
@@ -311,7 +316,7 @@ pub async fn stream_orderbooks_batch(
         .unwrap_or_else(|| Symbol::new("", ""));
 
     tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
+        while let Some(msg) = recv_while_open(&mut rx, &tx_out).await {
             // Extract symbol from topic: /spotMarket/level2Depth5:BTC-USDT
             let sym = msg
                 .topic
@@ -354,7 +359,7 @@ pub async fn stream_trades_batch(
 
     let (tx_out, rx_out) = mpsc::channel::<Trade>(256);
     tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
+        while let Some(msg) = recv_while_open(&mut rx, &tx_out).await {
             if let Some(data) = msg.data {
                 if let Ok(trade_data) = serde_json::from_value::<KucoinWsTradeData>(data) {
                     let trade = trade_data.into_trade();

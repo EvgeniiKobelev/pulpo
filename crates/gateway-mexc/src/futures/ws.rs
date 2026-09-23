@@ -66,6 +66,8 @@ async fn subscribe_and_stream(
 
             loop {
                 tokio::select! {
+                    // Потребитель бросил стрим — закрываем соединение сразу.
+                    _ = tx.closed() => break 'outer,
                     _ = ping_interval.tick() => {
                         if write.send(Message::text(make_ping())).await.is_err() {
                             break;
@@ -199,7 +201,7 @@ pub async fn stream_trades(
     let (tx_out, rx_out) = mpsc::channel::<Trade>(256);
     tokio::spawn(async move {
         let mut stream = std::pin::pin!(raw_stream);
-        while let Some(ws_msg) = stream.next().await {
+        while let Some(ws_msg) = next_while_open(&mut stream, &tx_out).await {
             if ws_msg.channel != "push.deal" {
                 continue;
             }
@@ -336,7 +338,7 @@ pub async fn stream_trades_batch(
     let (tx_out, rx_out) = mpsc::channel::<Trade>(256);
     tokio::spawn(async move {
         let mut stream = std::pin::pin!(raw_stream);
-        while let Some(ws_msg) = stream.next().await {
+        while let Some(ws_msg) = next_while_open(&mut stream, &tx_out).await {
             if ws_msg.channel != "push.deal" {
                 continue;
             }

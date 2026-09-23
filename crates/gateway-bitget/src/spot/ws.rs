@@ -80,6 +80,8 @@ async fn subscribe_and_stream(
 
             loop {
                 tokio::select! {
+                    // Потребитель бросил стрим — закрываем соединение сразу.
+                    _ = tx.closed() => break 'outer,
                     _ = ping_interval.tick() => {
                         if write.send(Message::text("ping".to_string())).await.is_err() {
                             break;
@@ -388,6 +390,13 @@ async fn maintain_shard(
     loop {
         tokio::select! {
             biased;
+            // Выход закрыт (потребитель бросил стрим или combined-подписка
+            // не собралась) — шард выходит и дропает `raw`, сырой WS-таск
+            // закрывает соединение; иначе шард жил бы вечно с реконнектами.
+            _ = out_tx.closed() => {
+                debug!("Bitget Spot maintain shard: consumer dropped");
+                return;
+            }
 
             ev = raw.next() => {
                 let Some(json) = ev else {
@@ -614,6 +623,10 @@ fn spawn_bootstrap(symbol: Symbol, rest: Arc<BitgetRest>, snap_tx: mpsc::Sender<
     tokio::spawn(async move {
         let mut backoff = Duration::from_secs(1);
         loop {
+            // Шард вышел — снапшот больше некому применять.
+            if snap_tx.is_closed() {
+                return;
+            }
             // REST у Bitget'а capped 150 уровней. Используется только на
             // re-sync (snapshot обычно приходит сразу из WS). Глубину
             // дофиксит первый же WS update.

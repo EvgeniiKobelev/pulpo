@@ -66,6 +66,8 @@ async fn subscribe_and_stream(
 
             loop {
                 tokio::select! {
+                    // Потребитель бросил стрим — закрываем соединение сразу.
+                    _ = tx.closed() => break 'outer,
                     _ = ping_interval.tick() => {
                         if write.send(Message::text("ping".to_string())).await.is_err() {
                             break;
@@ -401,6 +403,13 @@ async fn maintain_shard(
     loop {
         tokio::select! {
             biased;
+            // Выход закрыт (потребитель бросил стрим или combined-подписка
+            // не собралась) — шард выходит и дропает `raw`, сырой WS-таск
+            // закрывает соединение; иначе шард жил бы вечно с реконнектами.
+            _ = out_tx.closed() => {
+                debug!("Bitget Futures maintain shard: consumer dropped");
+                return;
+            }
 
             ev = raw.next() => {
                 let Some(json) = ev else {
@@ -630,6 +639,10 @@ fn spawn_bootstrap(
     tokio::spawn(async move {
         let mut backoff = Duration::from_secs(1);
         loop {
+            // Шард вышел — снапшот больше некому применять.
+            if snap_tx.is_closed() {
+                return;
+            }
             // REST у Bitget futures capped 100 уровней. Используется только
             // на re-sync. Глубина дофиксится последующими WS update'ами.
             match rest.orderbook(&symbol, 100).await {
