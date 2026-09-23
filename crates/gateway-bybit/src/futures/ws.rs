@@ -64,6 +64,8 @@ async fn subscribe_and_stream(
 
             loop {
                 tokio::select! {
+                    // Потребитель бросил стрим — закрываем соединение сразу.
+                    _ = tx.closed() => break 'outer,
                     _ = resub_interval.tick() => {
                         debug!("Bybit Futures WS: periodic resubscribe to refresh stale levels");
                         let mut all_ok = true;
@@ -358,6 +360,13 @@ async fn maintain_shard(
     loop {
         tokio::select! {
             biased;
+            // Выход закрыт (потребитель бросил стрим или combined-подписка
+            // не собралась) — шард выходит и дропает `raw`, сырой WS-таск
+            // закрывает соединение; иначе шард жил бы вечно с реконнектами.
+            _ = out_tx.closed() => {
+                debug!("Bybit Futures maintain shard: consumer dropped");
+                return;
+            }
 
             ev = raw.next() => {
                 let Some(json) = ev else {
@@ -580,6 +589,10 @@ fn spawn_bootstrap(
     tokio::spawn(async move {
         let mut backoff = Duration::from_secs(1);
         loop {
+            // Шард вышел — снапшот больше некому применять.
+            if snap_tx.is_closed() {
+                return;
+            }
             // Bybit linear REST max limit = 500.
             match rest.orderbook(&symbol, 500).await {
                 Ok(ob) => {

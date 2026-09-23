@@ -74,6 +74,8 @@ async fn run_ws_loop(
     'outer: loop {
         loop {
             tokio::select! {
+                // Потребитель бросил стрим — закрываем соединение сразу.
+                _ = tx.closed() => break 'outer,
                 // ---- read data ----
                 msg = read.next() => {
                     match msg {

@@ -241,6 +241,8 @@ async fn subscribe_and_stream(
             // ---- message read loop with periodic ping ----
             loop {
                 tokio::select! {
+                    // Потребитель бросил стрим — закрываем соединение сразу.
+                    _ = tx.closed() => break 'outer,
                     msg = read.next() => {
                         match msg {
                             Some(Ok(Message::Text(text))) => {

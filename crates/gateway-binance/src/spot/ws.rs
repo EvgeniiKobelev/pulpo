@@ -100,6 +100,8 @@ async fn subscribe_and_stream(
             // ---- message read loop with periodic ping ----
             loop {
                 tokio::select! {
+                    // Потребитель бросил стрим — закрываем соединение сразу.
+                    _ = tx.closed() => break 'outer,
                     msg = read.next() => {
                         match msg {
                             Some(Ok(Message::Text(text))) => {
@@ -368,6 +370,13 @@ async fn maintain_shard(
     loop {
         tokio::select! {
             biased;
+            // Выход закрыт (потребитель бросил стрим или combined-подписка
+            // не собралась) — шард выходит и дропает `raw`, сырой WS-таск
+            // закрывает соединение; иначе шард жил бы вечно с реконнектами.
+            _ = out_tx.closed() => {
+                debug!("Binance Spot maintain shard: consumer dropped");
+                return;
+            }
 
             // 1. WS diff event.
             ev = raw.next() => {
@@ -633,6 +642,10 @@ fn spawn_bootstrap(
     tokio::spawn(async move {
         let mut backoff = Duration::from_secs(1);
         loop {
+            // Шард вышел — снапшот больше некому применять.
+            if snap_tx.is_closed() {
+                return;
+            }
             spot_limiter().acquire(DEPTH_WEIGHT).await;
             match rest.orderbook(&symbol, 1000).await {
                 Ok(ob) => {

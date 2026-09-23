@@ -136,6 +136,11 @@ async fn run_ws_loop(channels: Vec<String>, tx: mpsc::Sender<DecodedMsg>) {
 
         loop {
             tokio::select! {
+                // Потребитель бросил стрим — закрываем соединение сразу.
+                _ = tx.closed() => {
+                    debug!("WS receiver dropped");
+                    return;
+                }
                 _ = ping_interval.tick() => {
                     if write.send(Message::text(make_ping())).await.is_err() {
                         warn!("MEXC WS ping failed");
@@ -298,7 +303,7 @@ pub async fn stream_orderbook(
 
     let (tx_out, rx_out) = mpsc::channel::<OrderBook>(256);
     tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
+        while let Some(msg) = recv_while_open(&mut rx, &tx_out).await {
             if let DecodedMsg::Depths {
                 create_time,
                 depths,
@@ -324,7 +329,7 @@ pub async fn stream_trades(_config: &ExchangeConfig, symbol: &Symbol) -> Result<
 
     let (tx_out, rx_out) = mpsc::channel::<Trade>(256);
     tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
+        while let Some(msg) = recv_while_open(&mut rx, &tx_out).await {
             if let DecodedMsg::Deals { deals, .. } = msg {
                 for item in &deals.deals {
                     let trade = pb_deal_to_trade(item, sym.clone());
@@ -352,7 +357,7 @@ pub async fn stream_candles(
 
     let (tx_out, rx_out) = mpsc::channel::<Candle>(256);
     tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
+        while let Some(msg) = recv_while_open(&mut rx, &tx_out).await {
             if let DecodedMsg::Kline { kline, .. } = msg {
                 if let Some(candle) = pb_kline_to_candle(&kline, sym.clone()) {
                     if tx_out.send(candle).await.is_err() {
@@ -390,7 +395,7 @@ pub async fn stream_orderbooks_batch(
 
     let (tx_out, rx_out) = mpsc::channel::<OrderBook>(256);
     tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
+        while let Some(msg) = recv_while_open(&mut rx, &tx_out).await {
             if let DecodedMsg::Depths {
                 symbol,
                 create_time,
@@ -429,7 +434,7 @@ pub async fn stream_trades_batch(
 
     let (tx_out, rx_out) = mpsc::channel::<Trade>(256);
     tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
+        while let Some(msg) = recv_while_open(&mut rx, &tx_out).await {
             if let DecodedMsg::Deals { symbol, deals, .. } = msg {
                 let sym = mexc_to_unified(&symbol);
                 for item in &deals.deals {
