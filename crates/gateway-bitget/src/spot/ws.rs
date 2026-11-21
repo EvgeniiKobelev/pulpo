@@ -1,11 +1,8 @@
 use crate::spot::mapper::*;
-use crate::spot::rest::BitgetRest;
 use futures::{SinkExt, StreamExt};
 use gateway_core::*;
-use rust_decimal::Decimal;
-use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -17,12 +14,18 @@ const WS_URL: &str = "wss://ws.bitget.com/v2/ws/public";
 /// Эмитим всю поддерживаемую глубину.
 const TOP_LEVELS: usize = 500;
 
-/// Сколько update'ов копим в буфер пока ждём REST snapshot на re-sync.
-const MAX_BUFFER: usize = 1024;
-
 /// Bitget публикует ограничение ~50 подписок на одно соединение. Держим
 /// консервативный 40 чтобы не упереться при добавлении символов.
 const MAX_ARGS_PER_CONNECTION: usize = 40;
+
+/// Сколько ждём WS-снапшот после переподписки на разрыве seq, прежде чем
+/// переподписаться снова; дальше ожидание удваивается до `RESUB_BACKOFF_MAX`.
+/// Снапшот приходит за доли секунды — 10 с означают потерянный subscribe.
+const RESUB_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10);
+const RESUB_BACKOFF_MAX: Duration = Duration::from_secs(60);
+/// Как часто шард проверяет символы, ждущие снапшот: тихий символ без дельт
+/// иначе не дал бы повода повторить потерянную переподписку.
+const RESUB_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
 // Core helper
@@ -37,6 +40,38 @@ const MAX_ARGS_PER_CONNECTION: usize = 40;
 async fn subscribe_and_stream(
     args: Vec<serde_json::Value>,
     periodic_resub: bool,
+) -> Result<BoxStream<serde_json::Value>> {
+    subscribe_and_stream_inner(args, periodic_resub, None).await
+}
+
+/// Поток `books` с каналом переподписки отдельных символов: шард шлёт туда
+/// arg символа, у которого разошёлся seq, и Bitget отвечает свежим
+/// WS-снапшотом с настоящим seq — цепочка дельт продолжается от него.
+async fn subscribe_books(
+    args: Vec<serde_json::Value>,
+) -> Result<(
+    BoxStream<serde_json::Value>,
+    mpsc::UnboundedSender<serde_json::Value>,
+)> {
+    let (resub_tx, resub_rx) = mpsc::unbounded_channel();
+    let stream = subscribe_and_stream_inner(args, true, Some(resub_rx)).await?;
+    Ok((stream, resub_tx))
+}
+
+/// Следующий arg на переподписку; без канала — никогда.
+async fn next_resub(
+    rx: &mut Option<mpsc::UnboundedReceiver<serde_json::Value>>,
+) -> Option<serde_json::Value> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn subscribe_and_stream_inner(
+    args: Vec<serde_json::Value>,
+    periodic_resub: bool,
+    mut resub_rx: Option<mpsc::UnboundedReceiver<serde_json::Value>>,
 ) -> Result<BoxStream<serde_json::Value>> {
     let (ws_stream, _) = connect_timeout(connect_async(WS_URL))
         .await
@@ -95,6 +130,12 @@ async fn subscribe_and_stream(
                     _ = resub_interval.tick(), if periodic_resub => {
                         debug!("Bitget spot WS: periodic resubscribe to refresh stale levels");
                         let sub = serde_json::json!({"op":"subscribe","args":args.clone()});
+                        if write.send(Message::text(sub.to_string())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(arg) = next_resub(&mut resub_rx) => {
+                        let sub = serde_json::json!({"op": "subscribe", "args": [arg]});
                         if write.send(Message::text(sub.to_string())).await.is_err() {
                             break;
                         }
@@ -273,13 +314,13 @@ pub async fn stream_candles(
 ///
 /// 1. После subscribe канал шлёт `action="snapshot"` (500 уровней) → reset.
 /// 2. Дальнейшие `action="update"` валидируются: `pseq == local.last_seq`.
-/// 3. На gap → REST snapshot через `/api/v2/spot/market/orderbook` (max 150)
-///    с буферизацией update'ов до его прихода.
+/// 3. На gap → переподписка этого instId на том же соединении: Bitget
+///    отвечает WS-снапшотом с seq; дельты до него не копим.
 /// 4. На initial sync эмитим top-500.
 /// 5. Каждый update эмитится как `OrderBook` с пришедшими уровнями.
 /// 6. На re-sync — diff между старой и новой книгой.
 pub async fn stream_orderbooks_batch(
-    config: &ExchangeConfig,
+    _config: &ExchangeConfig,
     symbols: &[Symbol],
 ) -> Result<BoxStream<OrderBook>> {
     let all_args: Vec<serde_json::Value> = symbols
@@ -296,14 +337,12 @@ pub async fn stream_orderbooks_batch(
         );
     }
 
-    let rest = Arc::new(BitgetRest::new(config));
     let (out_tx, out_rx) = mpsc::channel::<OrderBook>(8192);
 
     for chunk in all_args.chunks(MAX_ARGS_PER_CONNECTION) {
-        let raw = subscribe_and_stream(chunk.to_vec(), true).await?;
+        let (raw, resub_tx) = subscribe_books(chunk.to_vec()).await?;
         let shard_tx = out_tx.clone();
-        let shard_rest = rest.clone();
-        tokio::spawn(maintain_shard(raw, shard_tx, shard_rest));
+        tokio::spawn(maintain_shard(raw, shard_tx, resub_tx));
     }
 
     Ok(Box::pin(ReceiverStream::new(out_rx)))
@@ -359,19 +398,18 @@ pub async fn stream_trades_batch(
 // Maintain logic
 // ---------------------------------------------------------------------------
 
-struct BufferedUpdate {
-    seq: u64,
-    bids: Vec<(Decimal, Decimal)>,
-    asks: Vec<(Decimal, Decimal)>,
-    event_time: u64,
-}
-
 struct SymbolState {
     book: LocalOrderBook,
     last_seq: u64,
-    buffer: VecDeque<BufferedUpdate>,
-    bootstrap_in_flight: bool,
+    /// Переподписка на разрыве seq ждёт WS-снапшот.
+    resub: Option<PendingResub>,
     resync_count: u32,
+}
+
+/// Отправленная переподписка символа: когда ушла и через сколько повторить.
+struct PendingResub {
+    sent_at: Instant,
+    retry_after: Duration,
 }
 
 impl SymbolState {
@@ -379,27 +417,67 @@ impl SymbolState {
         Self {
             book: LocalOrderBook::with_max_per_side(TOP_LEVELS),
             last_seq: 0,
-            buffer: VecDeque::new(),
-            bootstrap_in_flight: false,
+            resub: None,
             resync_count: 0,
         }
     }
 }
 
-struct SnapshotMsg {
-    symbol: Symbol,
-    last_seq: u64,
-    bids: Vec<(Decimal, Decimal)>,
-    asks: Vec<(Decimal, Decimal)>,
+/// Книга символа разошлась с биржей (разрыв seq или дельта до снапшота):
+/// просим у Bitget свежий WS-снапшот переподпиской одного instId.
+///
+/// REST-снапшот Bitget сюда не годится: в нём нет seq. Подставленный вместо
+/// seq `timestamp_ms` (~1.8e12) всегда больше WS-seq, и все следующие дельты
+/// отбрасывались как старые — книга замерзала до плановой переподписки
+/// (до 300 с) и копила фантомы. Плюс REST отдаёт 150 уровней против 200 у WS.
+fn request_resub(
+    state: &mut SymbolState,
+    inst_id: &str,
+    resub_tx: &mpsc::UnboundedSender<serde_json::Value>,
+    now: Instant,
+) {
+    if state.resub.is_some() {
+        return;
+    }
+    let _ = resub_tx.send(sub_arg("books", inst_id));
+    state.resub = Some(PendingResub {
+        sent_at: now,
+        retry_after: RESUB_SNAPSHOT_TIMEOUT,
+    });
+}
+
+/// Повторяет переподписку символам, которые так и не получили снапшот.
+fn retry_stale_resubs(
+    states: &mut HashMap<Symbol, SymbolState>,
+    resub_tx: &mpsc::UnboundedSender<serde_json::Value>,
+    now: Instant,
+) {
+    for (symbol, state) in states.iter_mut() {
+        let Some(pending) = state.resub.as_mut() else {
+            continue;
+        };
+        if now.saturating_duration_since(pending.sent_at) < pending.retry_after {
+            continue;
+        }
+        warn!(
+            symbol = %symbol,
+            waited_secs = pending.retry_after.as_secs(),
+            "Bitget Spot: no snapshot after resubscribe, resubscribing again"
+        );
+        let _ = resub_tx.send(sub_arg("books", &unified_to_bitget(symbol)));
+        pending.sent_at = now;
+        pending.retry_after = (pending.retry_after * 2).min(RESUB_BACKOFF_MAX);
+    }
 }
 
 async fn maintain_shard(
     mut raw: BoxStream<serde_json::Value>,
     out_tx: mpsc::Sender<OrderBook>,
-    rest: Arc<BitgetRest>,
+    resub_tx: mpsc::UnboundedSender<serde_json::Value>,
 ) {
     let mut states: HashMap<Symbol, SymbolState> = HashMap::new();
-    let (snap_tx, mut snap_rx) = mpsc::channel::<SnapshotMsg>(256);
+    let mut resub_check = tokio::time::interval(RESUB_CHECK_INTERVAL);
+    resub_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
@@ -417,13 +495,14 @@ async fn maintain_shard(
                     debug!("Bitget Spot maintain shard: ws stream ended");
                     return;
                 };
-                if let Err(e) = handle_ws_event(&json, &mut states, &out_tx, &rest, &snap_tx).await {
+                let now = Instant::now();
+                if let Err(e) = handle_ws_event(&json, &mut states, &out_tx, &resub_tx, now).await {
                     debug!(error = %e, "bitget spot ws event ignored");
                 }
             }
 
-            Some(snap) = snap_rx.recv() => {
-                handle_snapshot(snap, &mut states, &out_tx).await;
+            _ = resub_check.tick() => {
+                retry_stale_resubs(&mut states, &resub_tx, Instant::now());
             }
         }
     }
@@ -433,8 +512,8 @@ async fn handle_ws_event(
     json: &serde_json::Value,
     states: &mut HashMap<Symbol, SymbolState>,
     out_tx: &mpsc::Sender<OrderBook>,
-    rest: &Arc<BitgetRest>,
-    snap_tx: &mpsc::Sender<SnapshotMsg>,
+    resub_tx: &mpsc::UnboundedSender<serde_json::Value>,
+    now: Instant,
 ) -> std::result::Result<(), &'static str> {
     let arg = json.get("arg").ok_or("no arg")?;
     let inst_id = arg
@@ -470,8 +549,9 @@ async fn handle_ws_event(
         let prev_book = std::mem::take(&mut state.book);
         state.book = new_book;
         state.last_seq = seq;
-        state.buffer.clear();
-        state.bootstrap_in_flight = false;
+        if state.resub.take().is_some() {
+            state.resync_count = 0;
+        }
 
         info!(
             symbol = %symbol,
@@ -501,19 +581,11 @@ async fn handle_ws_event(
         return Ok(());
     }
 
+    // Книга не готова (ждём снапшот после переподписки): дельты не копим.
+    // Снапшот авторитетен — на одном соединении он приходит после этих дельт
+    // и уже включает их; цепочка продолжается от его seq.
     if !state.book.ready {
-        if state.buffer.len() < MAX_BUFFER {
-            state.buffer.push_back(BufferedUpdate {
-                seq,
-                bids,
-                asks,
-                event_time,
-            });
-        }
-        if !state.bootstrap_in_flight {
-            state.bootstrap_in_flight = true;
-            spawn_bootstrap(symbol.clone(), rest.clone(), snap_tx.clone());
-        }
+        request_resub(state, inst_id, resub_tx, now);
         return Ok(());
     }
 
@@ -530,20 +602,10 @@ async fn handle_ws_event(
             event_pseq = pseq,
             event_seq = seq,
             resync_count = state.resync_count,
-            "Bitget Spot: sequence gap, triggering re-sync"
+            "Bitget Spot: sequence gap, resubscribing for a fresh WS snapshot"
         );
         state.book.ready = false;
-        state.buffer.clear();
-        state.buffer.push_back(BufferedUpdate {
-            seq,
-            bids,
-            asks,
-            event_time,
-        });
-        if !state.bootstrap_in_flight {
-            state.bootstrap_in_flight = true;
-            spawn_bootstrap(symbol, rest.clone(), snap_tx.clone());
-        }
+        request_resub(state, inst_id, resub_tx, now);
         return Ok(());
     }
 
@@ -564,118 +626,152 @@ async fn handle_ws_event(
     Ok(())
 }
 
-async fn handle_snapshot(
-    snap: SnapshotMsg,
-    states: &mut HashMap<Symbol, SymbolState>,
-    out_tx: &mpsc::Sender<OrderBook>,
-) {
-    let Some(state) = states.get_mut(&snap.symbol) else {
-        return;
-    };
-    state.bootstrap_in_flight = false;
+#[cfg(test)]
+mod gap_tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+    use serde_json::json;
 
-    if state.book.ready {
-        return;
+    const INST: &str = "HYPEUSDT";
+    const S0: u64 = 525_281_364_900;
+
+    fn books(action: &str, seq: u64, pseq: u64, asks: &[(&str, &str)]) -> serde_json::Value {
+        let levels: Vec<serde_json::Value> = asks.iter().map(|(p, q)| json!([p, q])).collect();
+        json!({
+            "action": action,
+            "arg": {"instType": "SPOT", "channel": "books", "instId": INST},
+            "data": [{
+                "bids": [["4.70", "100"]],
+                "asks": levels,
+                "ts": "1795287201394",
+                "seq": seq,
+                "pseq": pseq
+            }]
+        })
     }
 
-    let prev_book = std::mem::take(&mut state.book);
-    let mut new_book = LocalOrderBook::with_max_per_side(TOP_LEVELS);
-    new_book.set_snapshot(
-        snap.bids.iter().copied(),
-        snap.asks.iter().copied(),
-        snap.last_seq,
-    );
-
-    // REST snapshot Bitget'а не несёт seq (only ts), поэтому мы кладём в
-    // last_update_id значение из WS-update'а, который инициировал re-sync.
-    // Дренируем буфер: все события с seq <= snap.last_seq устаревшие.
-    let mut last_event_time = 0u64;
-    while let Some(ev) = state.buffer.pop_front() {
-        if ev.seq <= new_book.last_update_id {
-            continue;
-        }
-        last_event_time = ev.event_time;
-        new_book.apply_diff(ev.bids.iter().copied(), ev.asks.iter().copied(), ev.seq);
+    struct Harness {
+        states: HashMap<Symbol, SymbolState>,
+        out_tx: mpsc::Sender<OrderBook>,
+        out_rx: mpsc::Receiver<OrderBook>,
+        resub_tx: mpsc::UnboundedSender<serde_json::Value>,
+        resub_rx: mpsc::UnboundedReceiver<serde_json::Value>,
+        now: Instant,
     }
 
-    info!(
-        symbol = %snap.symbol,
-        levels_bids = new_book.bids.len(),
-        levels_asks = new_book.asks.len(),
-        last_seq = new_book.last_update_id,
-        was_resync = prev_book.last_update_id > 0,
-        "Bitget Spot: REST bootstrap applied"
-    );
-    state.last_seq = new_book.last_update_id;
-    state.book = new_book;
-    state.resync_count = 0;
-
-    let ts = if last_event_time > 0 {
-        last_event_time
-    } else {
-        0
-    };
-    let ob = if prev_book.last_update_id > 0 {
-        let (bids, asks) = state.book.diff_against_prev(&prev_book, TOP_LEVELS);
-        OrderBook {
-            exchange: ExchangeId::BitgetSpot,
-            symbol: snap.symbol.clone(),
-            bids,
-            asks,
-            timestamp_ms: ts,
-            sequence: Some(state.book.last_update_id),
-        }
-    } else {
-        state
-            .book
-            .to_orderbook(ExchangeId::BitgetSpot, snap.symbol.clone(), ts, TOP_LEVELS)
-    };
-    let _ = out_tx.send(ob).await;
-}
-
-fn spawn_bootstrap(symbol: Symbol, rest: Arc<BitgetRest>, snap_tx: mpsc::Sender<SnapshotMsg>) {
-    tokio::spawn(async move {
-        let mut backoff = Duration::from_secs(1);
-        loop {
-            // Шард вышел — снапшот больше некому применять.
-            if snap_tx.is_closed() {
-                return;
-            }
-            // REST у Bitget'а capped 150 уровней. Используется только на
-            // re-sync (snapshot обычно приходит сразу из WS). Глубину
-            // дофиксит первый же WS update.
-            match rest.orderbook(&symbol, 150).await {
-                Ok(ob) => {
-                    let bids: Vec<(Decimal, Decimal)> =
-                        ob.bids.iter().map(|l| (l.price, l.qty)).collect();
-                    let asks: Vec<(Decimal, Decimal)> =
-                        ob.asks.iter().map(|l| (l.price, l.qty)).collect();
-                    // REST у Bitget'а seq не возвращает. Используем ts как
-                    // monotonic id для last_update_id — это не идеально, но
-                    // дренаж буфера всё равно отбрасывает по локальному seq
-                    // следующего WS update'а.
-                    let last_seq = ob.sequence.unwrap_or_else(|| ob.timestamp_ms);
-                    let _ = snap_tx
-                        .send(SnapshotMsg {
-                            symbol,
-                            last_seq,
-                            bids,
-                            asks,
-                        })
-                        .await;
-                    return;
-                }
-                Err(e) => {
-                    warn!(
-                        symbol = %symbol,
-                        error = %e,
-                        backoff_ms = backoff.as_millis() as u64,
-                        "Bitget Spot REST snapshot failed"
-                    );
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(60));
-                }
+    impl Harness {
+        fn new() -> Self {
+            let (out_tx, out_rx) = mpsc::channel(64);
+            let (resub_tx, resub_rx) = mpsc::unbounded_channel();
+            Self {
+                states: HashMap::new(),
+                out_tx,
+                out_rx,
+                resub_tx,
+                resub_rx,
+                now: Instant::now(),
             }
         }
-    });
+
+        async fn feed(&mut self, ev: serde_json::Value) {
+            handle_ws_event(&ev, &mut self.states, &self.out_tx, &self.resub_tx, self.now)
+                .await
+                .expect("books event parses");
+        }
+
+        fn emitted(&mut self) -> Vec<OrderBook> {
+            std::iter::from_fn(|| self.out_rx.try_recv().ok()).collect()
+        }
+
+        fn resubs(&mut self) -> Vec<serde_json::Value> {
+            std::iter::from_fn(|| self.resub_rx.try_recv().ok()).collect()
+        }
+
+        fn state(&self) -> &SymbolState {
+            self.states
+                .get(&bitget_symbol_to_unified(INST))
+                .expect("symbol state exists")
+        }
+    }
+
+    /// Регрессия: разрыв seq просит WS-снапшот переподпиской одного instId
+    /// (не REST без seq) и до снапшота ничего не эмитит.
+    #[tokio::test]
+    async fn regression_gap_resubscribes_over_ws() {
+        let mut h = Harness::new();
+        h.feed(books("snapshot", S0, 0, &[("4.77", "12827")])).await;
+        h.feed(books("update", S0 + 1, S0, &[("4.78", "10")])).await;
+        assert_eq!(h.emitted().len(), 2);
+        assert!(h.resubs().is_empty());
+
+        h.feed(books("update", S0 + 5, S0 + 4, &[("4.78", "11")])).await;
+        assert!(h.emitted().is_empty(), "после разрыва книга не эмитится");
+        assert_eq!(h.resubs(), vec![sub_arg("books", INST)]);
+        assert!(!h.state().book.ready);
+
+        h.feed(books("update", S0 + 6, S0 + 5, &[("4.78", "12")])).await;
+        assert!(h.emitted().is_empty());
+        assert!(h.resubs().is_empty(), "одна переподписка на символ, пока ждём снапшот");
+    }
+
+    /// Регрессия: после разрыва снапшот переподписки исправляет книгу, и
+    /// цепочка дельт продолжается от его seq. Раньше REST-ресинк ставил
+    /// `last_seq = timestamp_ms` (~1.8e12 > WS-seq), все дельты отбрасывались,
+    /// и фантом 4.77 × 12827 жил до плановой переподписки.
+    #[tokio::test]
+    async fn regression_resubscribe_snapshot_continues_chain() {
+        let mut h = Harness::new();
+        h.feed(books("snapshot", S0, 0, &[("4.77", "12827")])).await;
+        h.feed(books("update", S0 + 5, S0 + 4, &[("4.78", "11")])).await;
+        h.emitted();
+        h.resubs();
+
+        let s2 = S0 + 16;
+        h.feed(books("snapshot", s2, 0, &[("4.77", "264")])).await;
+        let diff = h.emitted();
+        assert_eq!(diff.len(), 1);
+        assert!(diff[0].asks.iter().any(|l| l.price == dec!(4.77) && l.qty == dec!(264)));
+        assert!(h.state().book.ready);
+        assert!(h.state().resub.is_none());
+
+        h.feed(books("update", s2 + 1, s2, &[("4.77", "300")])).await;
+        let live = h.emitted();
+        assert_eq!(live.len(), 1, "дельта после снапшота эмитится");
+        assert_eq!(live[0].sequence, Some(s2 + 1));
+        assert_eq!(live[0].asks[0].qty, dec!(300));
+    }
+
+    /// Потерянная переподписка повторяется с удвоением ожидания, а снапшот
+    /// снимает ожидание.
+    #[tokio::test]
+    async fn stale_resubscribe_is_retried_with_backoff() {
+        let mut h = Harness::new();
+        let t0 = h.now;
+        h.feed(books("snapshot", S0, 0, &[("4.77", "264")])).await;
+        h.feed(books("update", S0 + 5, S0 + 4, &[("4.78", "11")])).await;
+        assert_eq!(h.resubs().len(), 1);
+
+        retry_stale_resubs(&mut h.states, &h.resub_tx, t0 + Duration::from_secs(5));
+        assert!(h.resubs().is_empty());
+        retry_stale_resubs(&mut h.states, &h.resub_tx, t0 + RESUB_SNAPSHOT_TIMEOUT);
+        assert_eq!(h.resubs().len(), 1);
+        retry_stale_resubs(&mut h.states, &h.resub_tx, t0 + Duration::from_secs(29));
+        assert!(h.resubs().is_empty(), "второе ожидание вдвое длиннее");
+        retry_stale_resubs(&mut h.states, &h.resub_tx, t0 + Duration::from_secs(30));
+        assert_eq!(h.resubs().len(), 1);
+
+        h.feed(books("snapshot", S0 + 40, 0, &[("4.77", "264")])).await;
+        retry_stale_resubs(&mut h.states, &h.resub_tx, t0 + Duration::from_secs(300));
+        assert!(h.resubs().is_empty(), "снапшот снял ожидание");
+    }
+
+    /// Дельта символа без снапшота (снапшот потерян) тоже ведёт в
+    /// переподписку, а не в REST.
+    #[tokio::test]
+    async fn delta_before_first_snapshot_requests_resubscribe() {
+        let mut h = Harness::new();
+        h.feed(books("update", S0 + 1, S0, &[("4.78", "10")])).await;
+        assert!(h.emitted().is_empty());
+        assert_eq!(h.resubs(), vec![sub_arg("books", INST)]);
+    }
 }
