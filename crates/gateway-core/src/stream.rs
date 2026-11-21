@@ -48,6 +48,53 @@ pub async fn recv_while_open<T, U>(
     }
 }
 
+/// Сколько WS-соединение может молчать, прежде чем его сочтут мёртвым.
+///
+/// Полуоткрытый TCP (сеть пропала без FIN/RST) не даёт ни ошибки чтения,
+/// ни конца стрима: `read.next()` ждёт вечно, а запись ping уходит в буфер
+/// ядра без ошибки ещё ~15 минут ретрансмитов. Книга при этом замерзает,
+/// и downstream держит снятые стенки живыми. Каждый цикл чтения шлёт свой
+/// ping не реже раза в 30 с, и биржа на него отвечает, так что на живом
+/// соединении кадр приходит минимум дважды за это окно.
+pub const WS_READ_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Дедлайн тишины чтения WS-соединения.
+///
+/// Любой принятый кадр сдвигает дедлайн ([`ReadIdle::touch`]); ветка
+/// `idle.expired()` в `select!` срабатывает, когда кадров не было дольше
+/// таймаута, — цикл выходит в обычный путь реконнекта (resubscribe →
+/// snapshot → diff). В `select!` ставить с `biased;` после ветки чтения:
+/// иначе после долгой блокировки обработчика (медленный downstream)
+/// случайный выбор может взять истёкший дедлайн при готовом кадре в буфере.
+pub struct ReadIdle {
+    timeout: std::time::Duration,
+    deadline: tokio::time::Instant,
+}
+
+impl ReadIdle {
+    pub fn new(timeout: std::time::Duration) -> Self {
+        Self {
+            timeout,
+            deadline: tokio::time::Instant::now() + timeout,
+        }
+    }
+
+    /// Пришёл кадр (или поднято новое соединение) — отсчёт заново.
+    pub fn touch(&mut self) {
+        self.deadline = tokio::time::Instant::now() + self.timeout;
+    }
+
+    /// Будущее, которое завершится на дедлайне. Пересоздаётся на каждом
+    /// витке `select!`, дедлайн двигает только [`ReadIdle::touch`].
+    pub fn expired(&self) -> tokio::time::Sleep {
+        tokio::time::sleep_until(self.deadline)
+    }
+
+    pub fn timeout(&self) -> std::time::Duration {
+        self.timeout
+    }
+}
+
 /// То же, что [`recv_while_open`], для произвольного стрима.
 pub async fn next_while_open<S, U>(
     stream: &mut S,
@@ -78,6 +125,20 @@ mod tests {
         drop(out_rx);
         // Источник молчит, но выход закрыт — пересыльщик не должен висеть.
         assert_eq!(recv_while_open(&mut raw_rx, &out_tx).await, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_idle_fires_only_after_silence() {
+        let timeout = std::time::Duration::from_secs(60);
+        let mut idle = ReadIdle::new(timeout);
+        tokio::time::advance(std::time::Duration::from_secs(50)).await;
+        // Кадр на 50-й секунде — отсчёт заново, через 59 с дедлайн не наступил.
+        idle.touch();
+        let early = tokio::time::timeout(std::time::Duration::from_secs(59), idle.expired()).await;
+        assert!(early.is_err(), "дедлайн сработал раньше таймаута после touch");
+        // Ещё секунда тишины — дедлайн наступил.
+        let late = tokio::time::timeout(std::time::Duration::from_secs(2), idle.expired()).await;
+        assert!(late.is_ok(), "дедлайн не сработал после таймаута тишины");
     }
 
     #[tokio::test]
