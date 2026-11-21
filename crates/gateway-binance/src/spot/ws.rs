@@ -561,6 +561,18 @@ async fn handle_snapshot(
                 break;
             }
             first_applied = true;
+        } else if ev.first_update_id != new_book.last_update_id + 1 {
+            // Дальше по Spot docs U каждого события == u предыдущего + 1.
+            // Дыра внутри буфера (дроп кадра при полном downstream) иначе
+            // молча легла бы в книгу — и она разошлась бы с биржей.
+            warn!(
+                symbol = %snap.symbol,
+                local_lub = new_book.last_update_id,
+                event_U = ev.first_update_id,
+                "Binance Spot: buffered event chain broken, re-syncing"
+            );
+            bootstrap_failed = true;
+            break;
         }
         last_event_time = ev.event_time;
         new_book.apply_diff(
@@ -726,4 +738,64 @@ pub async fn stream_trades_combined(
     }
 
     Ok(Box::pin(select_all))
+}
+
+#[cfg(test)]
+mod resync_tests {
+    //! Воспроизведение буфера после REST-снимка (Binance Spot): первое
+    //! событие перекрывает снимок (U <= lastUpdateId+1 <= u), дальше
+    //! U == u предыдущего + 1.
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    fn sol() -> Symbol {
+        Symbol::new("SOL", "USDT")
+    }
+
+    fn diff(first: u64, last: u64) -> BufferedDiff {
+        BufferedDiff {
+            first_update_id: first,
+            last_update_id: last,
+            bids: vec![(dec!(70), dec!(1))],
+            asks: vec![],
+            event_time: 1,
+        }
+    }
+
+    fn snapshot() -> SnapshotMsg {
+        SnapshotMsg {
+            symbol: sol(),
+            last_update_id: 1000,
+            bids: vec![(dec!(70), dec!(5))],
+            asks: vec![(dec!(71), dec!(5))],
+        }
+    }
+
+    #[tokio::test]
+    async fn overlapping_first_then_contiguous_chain_initializes_book() {
+        let mut st = SymbolState::new();
+        st.buffer.push_back(diff(990, 995)); // старше снимка — дроп
+        st.buffer.push_back(diff(996, 1003)); // перекрывает 1001
+        st.buffer.push_back(diff(1004, 1006));
+        let mut states = HashMap::from([(sol(), st)]);
+        let (out_tx, _out_rx) = mpsc::channel::<OrderBook>(16);
+        handle_snapshot(snapshot(), &mut states, &out_tx).await;
+        let book = &states[&sol()].book;
+        assert!(book.ready);
+        assert_eq!(book.last_update_id, 1006);
+    }
+
+    #[tokio::test]
+    async fn gap_inside_buffer_fails_bootstrap() {
+        let mut st = SymbolState::new();
+        st.buffer.push_back(diff(996, 1003));
+        // 1004..1007 потерян — следующее событие начинается с 1008.
+        st.buffer.push_back(diff(1008, 1010));
+        let mut states = HashMap::from([(sol(), st)]);
+        let (out_tx, _out_rx) = mpsc::channel::<OrderBook>(16);
+        handle_snapshot(snapshot(), &mut states, &out_tx).await;
+        let st = &states[&sol()];
+        assert!(!st.book.ready, "дыра внутри буфера легла в книгу");
+        assert_eq!(st.failed_bootstraps, 1);
+    }
 }
