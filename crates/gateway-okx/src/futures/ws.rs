@@ -13,8 +13,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
 
-const WS_PUBLIC_URL: &str = "wss://ws.okx.com:8443/ws/v5/public";
-const WS_BUSINESS_URL: &str = "wss://ws.okx.com:8443/ws/v5/business";
+const WS_PUBLIC_URL: &str = "wss://ws.okx.com/ws/v5/public";
+const WS_BUSINESS_URL: &str = "wss://ws.okx.com/ws/v5/business";
 const EXCHANGE: ExchangeId = ExchangeId::Okx;
 
 /// См. spot/ws.rs — канал `books` отдаёт 400 уровней.
@@ -34,7 +34,7 @@ async fn subscribe_and_stream(
 ) -> Result<BoxStream<serde_json::Value>> {
     let url_owned = url.to_string();
 
-    let (ws_stream, _) = connect_async(&url_owned)
+    let (ws_stream, _) = connect_timeout(connect_async(&url_owned))
         .await
         .map_err(|e| GatewayError::WebSocket {
             exchange: EXCHANGE,
@@ -58,6 +58,7 @@ async fn subscribe_and_stream(
         let mut write = write;
         let mut read = read;
         let mut backoff = Duration::from_secs(1);
+        let mut idle = ReadIdle::new(WS_READ_IDLE_TIMEOUT);
 
         'outer: loop {
             let _ = write.send(Message::text("ping".to_string())).await;
@@ -67,9 +68,13 @@ async fn subscribe_and_stream(
             // См. spot/ws.rs — periodic re-subscribe для refresh stale levels.
             let mut resub_interval = tokio::time::interval(Duration::from_secs(300));
             resub_interval.tick().await;
+            idle.touch();
 
             loop {
+                // biased: тикеры раньше чтения — поток данных их не вытеснит;
+                // дедлайн тишины последним — при готовом кадре он не выигрывает.
                 tokio::select! {
+                    biased;
                     // Потребитель бросил стрим — закрываем соединение сразу.
                     _ = tx.closed() => break 'outer,
                     _ = ping_interval.tick() => {
@@ -85,6 +90,7 @@ async fn subscribe_and_stream(
                         }
                     }
                     msg = read.next() => {
+                        idle.touch();
                         match msg {
                             Some(Ok(Message::Text(text))) => {
                                 if text == "pong" {
@@ -119,6 +125,14 @@ async fn subscribe_and_stream(
                             _ => {}
                         }
                     }
+                    _ = idle.expired() => {
+                        warn!(
+                            args = args.len(),
+                            idle_secs = idle.timeout().as_secs(),
+                            "OKX Futures WS: no frames, connection presumed dead — reconnecting"
+                        );
+                        break;
+                    }
                 }
             }
 
@@ -128,7 +142,7 @@ async fn subscribe_and_stream(
                 }
                 warn!("OKX futures WS reconnecting in {backoff:?}…");
                 tokio::time::sleep(backoff).await;
-                match connect_async(&url_owned).await {
+                match connect_timeout(connect_async(&url_owned)).await {
                     Ok((ws, _)) => {
                         let (mut new_write, new_read) = ws.split();
                         let sub = serde_json::json!({"op": "subscribe", "args": args.clone()});

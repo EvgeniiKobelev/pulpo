@@ -1,8 +1,8 @@
 use crate::rate_limit::spot_limiter;
-use gateway_core::LocalOrderBook;
 use crate::spot::mapper::*;
 use crate::spot::rest::BinanceRest;
 use futures::{SinkExt, StreamExt};
+use gateway_core::LocalOrderBook;
 use gateway_core::*;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};
@@ -62,10 +62,12 @@ async fn subscribe_and_stream(
 ) -> Result<BoxStream<serde_json::Value>> {
     let url = url.to_string();
 
-    let (ws_stream, _) = connect_async(&url).await.map_err(|e| GatewayError::WebSocket {
-        exchange: ExchangeId::BinanceSpot,
-        message: e.to_string(),
-    })?;
+    let (ws_stream, _) = connect_timeout(connect_async(&url))
+        .await
+        .map_err(|e| GatewayError::WebSocket {
+            exchange: ExchangeId::BinanceSpot,
+            message: e.to_string(),
+        })?;
 
     let (mut write, read) = ws_stream.split();
 
@@ -95,14 +97,25 @@ async fn subscribe_and_stream(
         let mut dropped: u64 = 0;
         let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
         ping_interval.tick().await; // skip first immediate tick
+        let mut idle = ReadIdle::new(WS_READ_IDLE_TIMEOUT);
 
         'outer: loop {
             // ---- message read loop with periodic ping ----
             loop {
+                // biased: ping раньше чтения — поток данных его не вытеснит;
+                // дедлайн тишины последним — при готовом кадре он не выигрывает.
                 tokio::select! {
+                    biased;
                     // Потребитель бросил стрим — закрываем соединение сразу.
                     _ = tx.closed() => break 'outer,
+                    _ = ping_interval.tick() => {
+                        if write.send(Message::Ping(vec![].into())).await.is_err() {
+                            warn!("Binance WS ping send failed");
+                            break;
+                        }
+                    }
                     msg = read.next() => {
+                        idle.touch();
                         match msg {
                             Some(Ok(Message::Text(text))) => {
                                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -152,11 +165,13 @@ async fn subscribe_and_stream(
                             _ => {}
                         }
                     }
-                    _ = ping_interval.tick() => {
-                        if write.send(Message::Ping(vec![].into())).await.is_err() {
-                            warn!("Binance WS ping send failed");
-                            break;
-                        }
+                    _ = idle.expired() => {
+                        warn!(
+                            streams = streams.len(),
+                            idle_secs = idle.timeout().as_secs(),
+                            "Binance Spot WS: no frames, connection presumed dead — reconnecting"
+                        );
+                        break;
                     }
                 }
             }
@@ -168,7 +183,7 @@ async fn subscribe_and_stream(
                 }
                 warn!("Binance WS reconnecting in {backoff:?}…");
                 tokio::time::sleep(backoff).await;
-                match connect_async(&url).await {
+                match connect_timeout(connect_async(&url)).await {
                     Ok((ws, _)) => {
                         let (mut new_write, new_read) = ws.split();
                         if !streams.is_empty() {
@@ -191,6 +206,7 @@ async fn subscribe_and_stream(
                         read = new_read;
                         backoff = Duration::from_secs(1);
                         ping_interval.reset();
+                        idle.touch();
                         info!("Binance WS reconnected");
                         break;
                     }
@@ -226,10 +242,7 @@ pub async fn stream_orderbook(
 }
 
 /// Stream real-time trades for a single symbol.
-pub async fn stream_trades(
-    _config: &ExchangeConfig,
-    symbol: &Symbol,
-) -> Result<BoxStream<Trade>> {
+pub async fn stream_trades(_config: &ExchangeConfig, symbol: &Symbol) -> Result<BoxStream<Trade>> {
     let stream_name = format!("{}@trade", unified_to_binance(symbol).to_lowercase());
     let raw = subscribe_and_stream(WS_URL, vec![stream_name]).await?;
 
@@ -406,22 +419,16 @@ async fn handle_ws_event(
 ) -> std::result::Result<(), &'static str> {
     // Combined-stream обёртка: { "stream": "...", "data": {...} }.
     let depth_json = json.get("data").unwrap_or(json);
-    let raw: BinanceWsDepthRaw = serde_json::from_value(depth_json.clone())
-        .map_err(|_| "parse depth")?;
+    let raw: BinanceWsDepthRaw =
+        serde_json::from_value(depth_json.clone()).map_err(|_| "parse depth")?;
 
     let symbol = binance_symbol_to_unified(&raw.symbol);
-    let bids: Vec<(Decimal, Decimal)> = raw
-        .bids
-        .iter()
-        .filter_map(|p| parse_level(p))
-        .collect();
-    let asks: Vec<(Decimal, Decimal)> = raw
-        .asks
-        .iter()
-        .filter_map(|p| parse_level(p))
-        .collect();
+    let bids: Vec<(Decimal, Decimal)> = raw.bids.iter().filter_map(|p| parse_level(p)).collect();
+    let asks: Vec<(Decimal, Decimal)> = raw.asks.iter().filter_map(|p| parse_level(p)).collect();
 
-    let state = states.entry(symbol.clone()).or_insert_with(SymbolState::new);
+    let state = states
+        .entry(symbol.clone())
+        .or_insert_with(SymbolState::new);
 
     if !state.book.ready {
         // Накапливаем буфер до прихода snapshot'а.
@@ -554,6 +561,18 @@ async fn handle_snapshot(
                 break;
             }
             first_applied = true;
+        } else if ev.first_update_id != new_book.last_update_id + 1 {
+            // Дальше по Spot docs U каждого события == u предыдущего + 1.
+            // Дыра внутри буфера (дроп кадра при полном downstream) иначе
+            // молча легла бы в книгу — и она разошлась бы с биржей.
+            warn!(
+                symbol = %snap.symbol,
+                local_lub = new_book.last_update_id,
+                event_U = ev.first_update_id,
+                "Binance Spot: buffered event chain broken, re-syncing"
+            );
+            bootstrap_failed = true;
+            break;
         }
         last_event_time = ev.event_time;
         new_book.apply_diff(
@@ -608,7 +627,11 @@ async fn handle_snapshot(
     state.failed_bootstraps = 0;
 
     // Emit полный snapshot/diff.
-    let ts = if last_event_time > 0 { last_event_time } else { 0 };
+    let ts = if last_event_time > 0 {
+        last_event_time
+    } else {
+        0
+    };
     let ob = if prev_book.last_update_id > 0 {
         // Re-sync: emit diff между prev и new (включая qty=0 для удалённых).
         let (bids, asks) = state.book.diff_against_prev(&prev_book, TOP_LEVELS);
@@ -622,23 +645,16 @@ async fn handle_snapshot(
         }
     } else {
         // Initial: emit полный top-1000.
-        state.book.to_orderbook(
-            ExchangeId::BinanceSpot,
-            snap.symbol.clone(),
-            ts,
-            TOP_LEVELS,
-        )
+        state
+            .book
+            .to_orderbook(ExchangeId::BinanceSpot, snap.symbol.clone(), ts, TOP_LEVELS)
     };
     let _ = out_tx.send(ob).await;
 }
 
 /// Запуск background task'а для REST snapshot'а одного символа.
 /// Использует глобальный rate limiter, retry на ошибки.
-fn spawn_bootstrap(
-    symbol: Symbol,
-    rest: Arc<BinanceRest>,
-    snap_tx: mpsc::Sender<SnapshotMsg>,
-) {
+fn spawn_bootstrap(symbol: Symbol, rest: Arc<BinanceRest>, snap_tx: mpsc::Sender<SnapshotMsg>) {
     tokio::spawn(async move {
         let mut backoff = Duration::from_secs(1);
         loop {
@@ -722,4 +738,64 @@ pub async fn stream_trades_combined(
     }
 
     Ok(Box::pin(select_all))
+}
+
+#[cfg(test)]
+mod resync_tests {
+    //! Воспроизведение буфера после REST-снимка (Binance Spot): первое
+    //! событие перекрывает снимок (U <= lastUpdateId+1 <= u), дальше
+    //! U == u предыдущего + 1.
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    fn sol() -> Symbol {
+        Symbol::new("SOL", "USDT")
+    }
+
+    fn diff(first: u64, last: u64) -> BufferedDiff {
+        BufferedDiff {
+            first_update_id: first,
+            last_update_id: last,
+            bids: vec![(dec!(70), dec!(1))],
+            asks: vec![],
+            event_time: 1,
+        }
+    }
+
+    fn snapshot() -> SnapshotMsg {
+        SnapshotMsg {
+            symbol: sol(),
+            last_update_id: 1000,
+            bids: vec![(dec!(70), dec!(5))],
+            asks: vec![(dec!(71), dec!(5))],
+        }
+    }
+
+    #[tokio::test]
+    async fn overlapping_first_then_contiguous_chain_initializes_book() {
+        let mut st = SymbolState::new();
+        st.buffer.push_back(diff(990, 995)); // старше снимка — дроп
+        st.buffer.push_back(diff(996, 1003)); // перекрывает 1001
+        st.buffer.push_back(diff(1004, 1006));
+        let mut states = HashMap::from([(sol(), st)]);
+        let (out_tx, _out_rx) = mpsc::channel::<OrderBook>(16);
+        handle_snapshot(snapshot(), &mut states, &out_tx).await;
+        let book = &states[&sol()].book;
+        assert!(book.ready);
+        assert_eq!(book.last_update_id, 1006);
+    }
+
+    #[tokio::test]
+    async fn gap_inside_buffer_fails_bootstrap() {
+        let mut st = SymbolState::new();
+        st.buffer.push_back(diff(996, 1003));
+        // 1004..1007 потерян — следующее событие начинается с 1008.
+        st.buffer.push_back(diff(1008, 1010));
+        let mut states = HashMap::from([(sol(), st)]);
+        let (out_tx, _out_rx) = mpsc::channel::<OrderBook>(16);
+        handle_snapshot(snapshot(), &mut states, &out_tx).await;
+        let st = &states[&sol()];
+        assert!(!st.book.ready, "дыра внутри буфера легла в книгу");
+        assert_eq!(st.failed_bootstraps, 1);
+    }
 }

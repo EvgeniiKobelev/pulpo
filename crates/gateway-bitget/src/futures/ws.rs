@@ -28,7 +28,7 @@ async fn subscribe_and_stream(
     args: Vec<serde_json::Value>,
     periodic_resub: bool,
 ) -> Result<BoxStream<serde_json::Value>> {
-    let (ws_stream, _) = connect_async(WS_URL)
+    let (ws_stream, _) = connect_timeout(connect_async(WS_URL))
         .await
         .map_err(|e| GatewayError::WebSocket {
             exchange: ExchangeId::BitgetFutures,
@@ -52,6 +52,7 @@ async fn subscribe_and_stream(
         let mut write = write;
         let mut read = read;
         let mut backoff = Duration::from_secs(1);
+        let mut idle = ReadIdle::new(WS_READ_IDLE_TIMEOUT);
 
         'outer: loop {
             let _ = write.send(Message::text("ping".to_string())).await;
@@ -63,9 +64,13 @@ async fn subscribe_and_stream(
             // diff_against_prev обновляет stale-уровни в LocalOrderBook.
             let mut resub_interval = tokio::time::interval(Duration::from_secs(300));
             resub_interval.tick().await;
+            idle.touch();
 
             loop {
+                // biased: тикеры раньше чтения — поток данных их не вытеснит;
+                // дедлайн тишины последним — при готовом кадре он не выигрывает.
                 tokio::select! {
+                    biased;
                     // Потребитель бросил стрим — закрываем соединение сразу.
                     _ = tx.closed() => break 'outer,
                     _ = ping_interval.tick() => {
@@ -81,6 +86,7 @@ async fn subscribe_and_stream(
                         }
                     }
                     msg = read.next() => {
+                        idle.touch();
                         match msg {
                             Some(Ok(Message::Text(text))) => {
                                 if text == "pong" {
@@ -120,6 +126,14 @@ async fn subscribe_and_stream(
                             _ => {}
                         }
                     }
+                    _ = idle.expired() => {
+                        warn!(
+                            args = args.len(),
+                            idle_secs = idle.timeout().as_secs(),
+                            "Bitget Futures WS: no frames, connection presumed dead — reconnecting"
+                        );
+                        break;
+                    }
                 }
             }
 
@@ -129,7 +143,7 @@ async fn subscribe_and_stream(
                 }
                 warn!("Bitget futures WS reconnecting in {backoff:?}…");
                 tokio::time::sleep(backoff).await;
-                match connect_async(WS_URL).await {
+                match connect_timeout(connect_async(WS_URL)).await {
                     Ok((ws, _)) => {
                         let (mut new_write, new_read) = ws.split();
                         let sub = serde_json::json!({"op": "subscribe", "args": args.clone()});

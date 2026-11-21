@@ -202,10 +202,12 @@ pub struct BinanceFuturesTickerRaw {
     pub symbol: String,
     #[serde(rename = "lastPrice")]
     pub last_price: String,
-    #[serde(rename = "bidPrice")]
-    pub bid_price: String,
-    #[serde(rename = "askPrice")]
-    pub ask_price: String,
+    /// В `/fapi/v1/ticker/24hr` bid/ask нет (они только в спотовом 24hr и
+    /// в bookTicker): обязательные поля роняли разбор всего ответа.
+    #[serde(rename = "bidPrice", default)]
+    pub bid_price: Option<String>,
+    #[serde(rename = "askPrice", default)]
+    pub ask_price: Option<String>,
     pub volume: String,
     #[serde(rename = "priceChangePercent")]
     pub price_change_percent: String,
@@ -220,8 +222,8 @@ impl BinanceFuturesTickerRaw {
             exchange: ExchangeId::BinanceFutures,
             symbol,
             last_price: Decimal::from_str(&self.last_price).unwrap_or_default(),
-            bid: Decimal::from_str(&self.bid_price).ok(),
-            ask: Decimal::from_str(&self.ask_price).ok(),
+            bid: self.bid_price.and_then(|p| Decimal::from_str(&p).ok()),
+            ask: self.ask_price.and_then(|p| Decimal::from_str(&p).ok()),
             volume_24h: Decimal::from_str(&self.volume).unwrap_or_default(),
             price_change_pct_24h: Decimal::from_str(&self.price_change_percent).ok(),
             timestamp_ms: self.close_time,
@@ -925,6 +927,31 @@ mod tests {
         assert_eq!(ticker.exchange, ExchangeId::BinanceFutures);
         assert_eq!(ticker.symbol.base, "BTC");
         assert_eq!(ticker.last_price, dec!(50000.00));
+    }
+
+    /// Реальная форма ответа `/fapi/v1/ticker/24hr`: без bidPrice/askPrice.
+    /// Обязательные bid/ask роняли разбор всего массива («error decoding
+    /// response body»), all_tickers фьючерсов не работал никогда.
+    #[test]
+    fn futures_24hr_ticker_without_bid_ask_parses() {
+        let raw: Vec<BinanceFuturesTickerRaw> = serde_json::from_str(
+            r#"[{
+                "symbol": "HYPEUSDT", "priceChange": "0.08300",
+                "priceChangePercent": "0.136", "weightedAvgPrice": "59.1",
+                "lastPrice": "60.91800", "lastQty": "2.04",
+                "openPrice": "60.83500", "highPrice": "61.77500",
+                "lowPrice": "55.80300", "volume": "13573000.12",
+                "quoteVolume": "802662399.86666", "openTime": 1795197960000,
+                "closeTime": 1795284401718, "firstId": 881396754,
+                "lastId": 884637781, "count": 3240961
+            }]"#,
+        )
+        .unwrap();
+        let ticker = raw.into_iter().next().unwrap().into_ticker();
+        assert_eq!(ticker.symbol, Symbol::new("HYPE", "USDT"));
+        assert_eq!(ticker.last_price, dec!(60.91800));
+        assert_eq!(ticker.bid, None);
+        assert_eq!(ticker.ask, None);
     }
 
     #[test]
