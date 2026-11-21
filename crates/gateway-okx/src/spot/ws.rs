@@ -12,8 +12,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
 
-const WS_PUBLIC_URL: &str = "wss://ws.okx.com:8443/ws/v5/public";
-const WS_BUSINESS_URL: &str = "wss://ws.okx.com:8443/ws/v5/business";
+const WS_PUBLIC_URL: &str = "wss://ws.okx.com/ws/v5/public";
+const WS_BUSINESS_URL: &str = "wss://ws.okx.com/ws/v5/business";
 const EXCHANGE: ExchangeId = ExchangeId::Okx;
 
 /// Канал `books` отдаёт 400 уровней (snapshot + updates с seqId/prevSeqId).
