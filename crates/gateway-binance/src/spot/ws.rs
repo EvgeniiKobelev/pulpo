@@ -62,7 +62,7 @@ async fn subscribe_and_stream(
 ) -> Result<BoxStream<serde_json::Value>> {
     let url = url.to_string();
 
-    let (ws_stream, _) = connect_async(&url)
+    let (ws_stream, _) = connect_timeout(connect_async(&url))
         .await
         .map_err(|e| GatewayError::WebSocket {
             exchange: ExchangeId::BinanceSpot,
@@ -183,7 +183,7 @@ async fn subscribe_and_stream(
                 }
                 warn!("Binance WS reconnecting in {backoff:?}…");
                 tokio::time::sleep(backoff).await;
-                match connect_async(&url).await {
+                match connect_timeout(connect_async(&url)).await {
                     Ok((ws, _)) => {
                         let (mut new_write, new_read) = ws.split();
                         if !streams.is_empty() {

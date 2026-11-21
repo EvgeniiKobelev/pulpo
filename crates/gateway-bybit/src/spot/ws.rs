@@ -34,7 +34,7 @@ async fn subscribe_and_stream(
     topics: Vec<String>,
 ) -> Result<BoxStream<serde_json::Value>> {
     let (ws_stream, _) =
-        connect_async(WS_URL)
+        connect_timeout(connect_async(WS_URL))
             .await
             .map_err(|e| GatewayError::WebSocket {
                 exchange: ExchangeId::BybitSpot,
@@ -167,7 +167,7 @@ async fn subscribe_and_stream(
                 }
                 warn!("Bybit WS reconnecting in {backoff:?}…");
                 tokio::time::sleep(backoff).await;
-                match connect_async(WS_URL).await {
+                match connect_timeout(connect_async(WS_URL)).await {
                     Ok((ws, _)) => {
                         let (mut new_write, new_read) = ws.split();
                         let mut sub_ok = true;

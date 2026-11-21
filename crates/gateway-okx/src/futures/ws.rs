@@ -34,7 +34,7 @@ async fn subscribe_and_stream(
 ) -> Result<BoxStream<serde_json::Value>> {
     let url_owned = url.to_string();
 
-    let (ws_stream, _) = connect_async(&url_owned)
+    let (ws_stream, _) = connect_timeout(connect_async(&url_owned))
         .await
         .map_err(|e| GatewayError::WebSocket {
             exchange: EXCHANGE,
@@ -142,7 +142,7 @@ async fn subscribe_and_stream(
                 }
                 warn!("OKX futures WS reconnecting in {backoff:?}…");
                 tokio::time::sleep(backoff).await;
-                match connect_async(&url_owned).await {
+                match connect_timeout(connect_async(&url_owned)).await {
                     Ok((ws, _)) => {
                         let (mut new_write, new_read) = ws.split();
                         let sub = serde_json::json!({"op": "subscribe", "args": args.clone()});

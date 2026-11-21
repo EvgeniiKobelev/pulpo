@@ -65,7 +65,7 @@ async fn subscribe_and_stream_with(
     let url = url.to_string();
 
     let (ws_stream, _) =
-        connect_async(&url)
+        connect_timeout(connect_async(&url))
             .await
             .map_err(|e| GatewayError::WebSocket {
                 exchange: ExchangeId::BinanceFutures,
@@ -190,7 +190,7 @@ async fn subscribe_and_stream_with(
                 }
                 warn!("Binance Futures WS reconnecting in {backoff:?}…");
                 tokio::time::sleep(backoff).await;
-                match connect_async(&url).await {
+                match connect_timeout(connect_async(&url)).await {
                     Ok((ws, _)) => {
                         let (mut new_write, new_read) = ws.split();
                         if !streams.is_empty() {

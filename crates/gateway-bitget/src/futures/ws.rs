@@ -28,7 +28,7 @@ async fn subscribe_and_stream(
     args: Vec<serde_json::Value>,
     periodic_resub: bool,
 ) -> Result<BoxStream<serde_json::Value>> {
-    let (ws_stream, _) = connect_async(WS_URL)
+    let (ws_stream, _) = connect_timeout(connect_async(WS_URL))
         .await
         .map_err(|e| GatewayError::WebSocket {
             exchange: ExchangeId::BitgetFutures,
@@ -143,7 +143,7 @@ async fn subscribe_and_stream(
                 }
                 warn!("Bitget futures WS reconnecting in {backoff:?}…");
                 tokio::time::sleep(backoff).await;
-                match connect_async(WS_URL).await {
+                match connect_timeout(connect_async(WS_URL)).await {
                     Ok((ws, _)) => {
                         let (mut new_write, new_read) = ws.split();
                         let sub = serde_json::json!({"op": "subscribe", "args": args.clone()});
