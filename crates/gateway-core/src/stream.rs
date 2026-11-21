@@ -160,7 +160,10 @@ mod tests {
         // Кадр на 50-й секунде — отсчёт заново, через 59 с дедлайн не наступил.
         idle.touch();
         let early = tokio::time::timeout(std::time::Duration::from_secs(59), idle.expired()).await;
-        assert!(early.is_err(), "дедлайн сработал раньше таймаута после touch");
+        assert!(
+            early.is_err(),
+            "дедлайн сработал раньше таймаута после touch"
+        );
         // Ещё секунда тишины — дедлайн наступил.
         let late = tokio::time::timeout(std::time::Duration::from_secs(2), idle.expired()).await;
         assert!(late.is_ok(), "дедлайн не сработал после таймаута тишины");
