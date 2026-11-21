@@ -56,16 +56,32 @@ async fn subscribe_and_stream(
         let mut write = write;
         let mut read = read;
         let mut backoff = Duration::from_secs(1);
+        let mut idle = ReadIdle::new(WS_READ_IDLE_TIMEOUT);
 
         'outer: loop {
             // См. spot/ws.rs — periodic re-subscribe для refresh stale levels.
             let mut resub_interval = tokio::time::interval(Duration::from_secs(300));
             resub_interval.tick().await;
+            // Клиентский ping раз в 20 с (Bybit v5 его ждёт): тихое, но живое
+            // соединение всё равно даёт кадр — ответ `ret_msg: pong`, и
+            // дедлайн тишины не рвёт его зря.
+            let mut ping_interval = tokio::time::interval(Duration::from_secs(20));
+            ping_interval.tick().await;
+            idle.touch();
 
             loop {
+                // biased: тикеры раньше чтения — поток данных их не вытеснит;
+                // дедлайн тишины последним — при готовом кадре он не выигрывает.
                 tokio::select! {
+                    biased;
                     // Потребитель бросил стрим — закрываем соединение сразу.
                     _ = tx.closed() => break 'outer,
+                    _ = ping_interval.tick() => {
+                        let ping = serde_json::json!({"op": "ping"});
+                        if write.send(Message::text(ping.to_string())).await.is_err() {
+                            break;
+                        }
+                    }
                     _ = resub_interval.tick() => {
                         debug!("Bybit Futures WS: periodic resubscribe to refresh stale levels");
                         let mut all_ok = true;
@@ -81,10 +97,16 @@ async fn subscribe_and_stream(
                         }
                     }
                     msg_result = read.next() => {
+                        idle.touch();
                         match msg_result {
                             Some(Ok(Message::Text(text))) => {
                                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
                                     if json.get("op").and_then(|v| v.as_str()) == Some("ping") {
+                                        // Ответ на наш ping тоже несёт op=ping:
+                                        // {"success":true,"ret_msg":"pong",...}.
+                                        if json.get("success").is_some() {
+                                            continue;
+                                        }
                                         let pong = serde_json::json!({"op": "pong"});
                                         let _ = write.send(Message::text(pong.to_string())).await;
                                         continue;
@@ -119,6 +141,14 @@ async fn subscribe_and_stream(
                             }
                             _ => {}
                         }
+                    }
+                    _ = idle.expired() => {
+                        warn!(
+                            topics = topics.len(),
+                            idle_secs = idle.timeout().as_secs(),
+                            "Bybit Futures WS: no frames, connection presumed dead — reconnecting"
+                        );
+                        break;
                     }
                 }
             }
