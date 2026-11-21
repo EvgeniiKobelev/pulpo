@@ -89,7 +89,7 @@ async fn run_ws_loop(
             }
         };
 
-        let ws = match connect_async(&ws_url).await {
+        let ws = match connect_timeout(connect_async(&ws_url)).await {
             Ok((ws, _)) => {
                 info!("KuCoin WS connected");
                 ws
@@ -119,15 +119,19 @@ async fn run_ws_loop(
         }
 
         // Ping interval — KuCoin default is 18s, timeout is 10s.
-        let ping_secs = (ping_interval_ms / 1000).max(5);
+        // Сверху 20 с: pingInterval сервера не должен обогнать дедлайн
+        // тишины WS_READ_IDLE_TIMEOUT — иначе живое тихое соединение рвётся.
+        let ping_secs = (ping_interval_ms / 1000).clamp(5, 20);
         let mut ping_timer = tokio::time::interval(Duration::from_secs(ping_secs));
         ping_timer.tick().await; // skip first immediate tick
+        let mut idle = ReadIdle::new(WS_READ_IDLE_TIMEOUT);
 
         backoff = Duration::from_secs(1);
 
         // ---- message loop ----
         loop {
             tokio::select! {
+                biased;
                 // Потребитель бросил стрим — закрываем соединение сразу.
                 _ = tx.closed() => {
                     debug!("WS receiver dropped");
@@ -140,6 +144,7 @@ async fn run_ws_loop(
                     }
                 }
                 msg = read.next() => {
+                    idle.touch();
                     match msg {
                         Some(Ok(Message::Text(text))) => {
                             if let Ok(ws_msg) = serde_json::from_str::<KucoinWsMessage>(&text) {
@@ -170,6 +175,13 @@ async fn run_ws_loop(
                         }
                         _ => {}
                     }
+                }
+                _ = idle.expired() => {
+                    warn!(
+                        idle_secs = idle.timeout().as_secs(),
+                        "KuCoin WS: no frames, connection presumed dead — reconnecting"
+                    );
+                    break;
                 }
             }
         }

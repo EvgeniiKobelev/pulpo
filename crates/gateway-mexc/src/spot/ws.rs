@@ -108,7 +108,7 @@ async fn run_ws_loop(channels: Vec<String>, tx: mpsc::Sender<DecodedMsg>) {
             break;
         }
 
-        let ws = match tokio_tungstenite::connect_async(WS_URL).await {
+        let ws = match connect_timeout(tokio_tungstenite::connect_async(WS_URL)).await {
             Ok((ws, _)) => {
                 backoff = Duration::from_secs(1);
                 info!("MEXC WS connected to {WS_URL}");
@@ -133,9 +133,11 @@ async fn run_ws_loop(channels: Vec<String>, tx: mpsc::Sender<DecodedMsg>) {
 
         let mut ping_interval = tokio::time::interval(Duration::from_secs(8));
         ping_interval.tick().await;
+        let mut idle = ReadIdle::new(WS_READ_IDLE_TIMEOUT);
 
         loop {
             tokio::select! {
+                biased;
                 // Потребитель бросил стрим — закрываем соединение сразу.
                 _ = tx.closed() => {
                     debug!("WS receiver dropped");
@@ -148,6 +150,7 @@ async fn run_ws_loop(channels: Vec<String>, tx: mpsc::Sender<DecodedMsg>) {
                     }
                 }
                 msg = read.next() => {
+                    idle.touch();
                     match msg {
                         Some(Ok(Message::Binary(data))) => {
                             let decoded = decode_push(&data);
@@ -186,6 +189,13 @@ async fn run_ws_loop(channels: Vec<String>, tx: mpsc::Sender<DecodedMsg>) {
                         }
                         _ => {}
                     }
+                }
+                _ = idle.expired() => {
+                    warn!(
+                        idle_secs = idle.timeout().as_secs(),
+                        "MEXC WS: no frames, connection presumed dead — reconnecting"
+                    );
+                    break;
                 }
             }
         }

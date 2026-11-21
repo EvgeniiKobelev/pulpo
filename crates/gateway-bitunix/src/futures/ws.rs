@@ -55,7 +55,7 @@ async fn subscribe_stream(
     subscriptions: Vec<Subscription>,
 ) -> Result<BoxStream<serde_json::Value>> {
     let (ws_stream, _) =
-        connect_async(WS_URL)
+        connect_timeout(connect_async(WS_URL))
             .await
             .map_err(|e| GatewayError::WebSocket {
                 exchange: ExchangeId::BitunixFutures,
@@ -84,6 +84,7 @@ async fn run_ws_loop(
     // Send ping every 25 seconds to keep connection alive
     let mut ping_interval = tokio::time::interval(Duration::from_secs(25));
     ping_interval.tick().await;
+    let mut idle = ReadIdle::new(WS_READ_IDLE_TIMEOUT);
 
     let mut sub_idx: usize = 0;
     let mut sub_delay = tokio::time::interval(SUB_DELAY);
@@ -92,10 +93,33 @@ async fn run_ws_loop(
     'outer: loop {
         loop {
             tokio::select! {
+                biased;
                 // Потребитель бросил стрим — закрываем соединение сразу.
                 _ = tx.closed() => break 'outer,
+                // ---- send next subscribe message (interleaved with reads) ----
+                _ = sub_delay.tick(), if sub_idx < subscriptions.len() => {
+                    let msg = subscriptions[sub_idx].to_message();
+                    if write.send(Message::text(msg)).await.is_err() {
+                        warn!("Bitunix WS subscribe send failed at index {}", sub_idx);
+                        break;
+                    }
+                    sub_idx += 1;
+                }
+                // ---- periodic ping ----
+                _ = ping_interval.tick() => {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    let ping = serde_json::json!({"op": "ping", "ping": ts}).to_string();
+                    if write.send(Message::text(ping)).await.is_err() {
+                        warn!("Bitunix WS ping send failed");
+                        break;
+                    }
+                }
                 // ---- read data ----
                 msg = read.next() => {
+                    idle.touch();
                     match msg {
                         Some(Ok(Message::Text(text))) => {
                             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -141,26 +165,12 @@ async fn run_ws_loop(
                         _ => {}
                     }
                 }
-                // ---- send next subscribe message (interleaved with reads) ----
-                _ = sub_delay.tick(), if sub_idx < subscriptions.len() => {
-                    let msg = subscriptions[sub_idx].to_message();
-                    if write.send(Message::text(msg)).await.is_err() {
-                        warn!("Bitunix WS subscribe send failed at index {}", sub_idx);
-                        break;
-                    }
-                    sub_idx += 1;
-                }
-                // ---- periodic ping ----
-                _ = ping_interval.tick() => {
-                    let ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs();
-                    let ping = serde_json::json!({"op": "ping", "ping": ts}).to_string();
-                    if write.send(Message::text(ping)).await.is_err() {
-                        warn!("Bitunix WS ping send failed");
-                        break;
-                    }
+                _ = idle.expired() => {
+                    warn!(
+                        idle_secs = idle.timeout().as_secs(),
+                        "Bitunix WS: no frames, connection presumed dead — reconnecting"
+                    );
+                    break;
                 }
             }
         }
@@ -172,7 +182,7 @@ async fn run_ws_loop(
             }
             warn!("Bitunix WS reconnecting in {backoff:?}...");
             tokio::time::sleep(backoff).await;
-            match connect_async(WS_URL).await {
+            match connect_timeout(connect_async(WS_URL)).await {
                 Ok((ws, _)) => {
                     let (new_write, new_read) = ws.split();
                     write = new_write;
@@ -182,6 +192,7 @@ async fn run_ws_loop(
                     sub_delay.tick().await;
                     backoff = Duration::from_secs(1);
                     ping_interval.reset();
+                    idle.touch();
                     info!(
                         "Bitunix WS reconnected, re-subscribing to {} channels",
                         subscriptions.len()

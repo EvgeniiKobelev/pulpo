@@ -32,7 +32,7 @@ fn make_ping() -> String {
 async fn subscribe_and_stream(
     subs: Vec<String>,
 ) -> Result<BoxStream<MexcFuturesWsMessage>> {
-    let (ws_stream, _) = connect_async(WS_URL)
+    let (ws_stream, _) = connect_timeout(connect_async(WS_URL))
         .await
         .map_err(|e| GatewayError::WebSocket {
             exchange: EXCHANGE,
@@ -58,14 +58,17 @@ async fn subscribe_and_stream(
         let mut write = write;
         let mut read = read;
         let mut backoff = Duration::from_secs(1);
+        let mut idle = ReadIdle::new(WS_READ_IDLE_TIMEOUT);
 
         'outer: loop {
             let _ = write.send(Message::text(make_ping())).await;
             let mut ping_interval = tokio::time::interval(Duration::from_secs(15));
             ping_interval.tick().await;
+            idle.touch();
 
             loop {
                 tokio::select! {
+                    biased;
                     // Потребитель бросил стрим — закрываем соединение сразу.
                     _ = tx.closed() => break 'outer,
                     _ = ping_interval.tick() => {
@@ -74,6 +77,7 @@ async fn subscribe_and_stream(
                         }
                     }
                     msg = read.next() => {
+                        idle.touch();
                         match msg {
                             Some(Ok(Message::Text(text))) => {
                                 // Skip pong messages
@@ -112,6 +116,13 @@ async fn subscribe_and_stream(
                             _ => {}
                         }
                     }
+                    _ = idle.expired() => {
+                        warn!(
+                            idle_secs = idle.timeout().as_secs(),
+                            "MEXC Futures WS: no frames, connection presumed dead — reconnecting"
+                        );
+                        break;
+                    }
                 }
             }
 
@@ -122,7 +133,7 @@ async fn subscribe_and_stream(
                 }
                 warn!("MEXC Futures WS reconnecting in {backoff:?}…");
                 tokio::time::sleep(backoff).await;
-                match connect_async(WS_URL).await {
+                match connect_timeout(connect_async(WS_URL)).await {
                     Ok((ws, _)) => {
                         let (mut new_write, new_read) = ws.split();
                         let mut ok = true;

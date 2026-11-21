@@ -54,7 +54,7 @@ async fn subscribe_and_stream(
     let sub_msg = make_sub(channel, payload.clone());
     let channel_owned = channel.to_string();
 
-    let (ws_stream, _) = connect_async(WS_URL)
+    let (ws_stream, _) = connect_timeout(connect_async(WS_URL))
         .await
         .map_err(|e| GatewayError::WebSocket {
             exchange: EXCHANGE,
@@ -78,16 +78,19 @@ async fn subscribe_and_stream(
         let mut write = write;
         let mut read = read;
         let mut backoff = Duration::from_secs(1);
+        let mut idle = ReadIdle::new(WS_READ_IDLE_TIMEOUT);
 
         'outer: loop {
             // Send initial ping for this connection.
             let _ = write.send(Message::text(make_ping())).await;
             let mut ping_interval = tokio::time::interval(Duration::from_secs(20));
             ping_interval.tick().await; // skip first tick
+            idle.touch();
 
             // ---- message read loop with periodic ping ----
             loop {
                 tokio::select! {
+                    biased;
                     // Потребитель бросил стрим — закрываем соединение сразу.
                     _ = tx.closed() => break 'outer,
                     _ = ping_interval.tick() => {
@@ -96,6 +99,7 @@ async fn subscribe_and_stream(
                         }
                     }
                     msg = read.next() => {
+                        idle.touch();
                         match msg {
                             Some(Ok(Message::Text(text))) => {
                                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -134,6 +138,13 @@ async fn subscribe_and_stream(
                             _ => {}
                         }
                     }
+                    _ = idle.expired() => {
+                        warn!(
+                            idle_secs = idle.timeout().as_secs(),
+                            "Gate WS: no frames, connection presumed dead — reconnecting"
+                        );
+                        break;
+                    }
                 }
             }
 
@@ -144,7 +155,7 @@ async fn subscribe_and_stream(
                 }
                 warn!("Gate WS reconnecting in {backoff:?}…");
                 tokio::time::sleep(backoff).await;
-                match connect_async(WS_URL).await {
+                match connect_timeout(connect_async(WS_URL)).await {
                     Ok((ws, _)) => {
                         let (mut new_write, new_read) = ws.split();
                         let sub = make_sub(&channel_owned, payload.clone());
@@ -260,7 +271,7 @@ pub async fn stream_orderbooks_batch(
         return Ok(Box::pin(futures::stream::empty()));
     }
 
-    let (ws_stream, _) = connect_async(WS_URL)
+    let (ws_stream, _) = connect_timeout(connect_async(WS_URL))
         .await
         .map_err(|e| GatewayError::WebSocket {
             exchange: EXCHANGE,
@@ -296,14 +307,17 @@ pub async fn stream_orderbooks_batch(
         let mut write = write;
         let mut read = read;
         let mut backoff = Duration::from_secs(1);
+        let mut idle = ReadIdle::new(WS_READ_IDLE_TIMEOUT);
 
         'outer: loop {
             let _ = write.send(Message::text(make_ping())).await;
             let mut ping_interval = tokio::time::interval(Duration::from_secs(20));
             ping_interval.tick().await;
+            idle.touch();
 
             loop {
                 tokio::select! {
+                    biased;
                     // Потребитель бросил стрим — закрываем соединение сразу.
                     _ = tx.closed() => break 'outer,
                     _ = ping_interval.tick() => {
@@ -312,6 +326,7 @@ pub async fn stream_orderbooks_batch(
                         }
                     }
                     msg = read.next() => {
+                        idle.touch();
                         match msg {
                             Some(Ok(Message::Text(text))) => {
                                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -336,6 +351,13 @@ pub async fn stream_orderbooks_batch(
                             _ => {}
                         }
                     }
+                    _ = idle.expired() => {
+                        warn!(
+                            idle_secs = idle.timeout().as_secs(),
+                            "Gate WS: no frames, connection presumed dead — reconnecting"
+                        );
+                        break;
+                    }
                 }
             }
 
@@ -346,7 +368,7 @@ pub async fn stream_orderbooks_batch(
                 }
                 warn!("Gate WS batch reconnecting in {backoff:?}…");
                 tokio::time::sleep(backoff).await;
-                match connect_async(WS_URL).await {
+                match connect_timeout(connect_async(WS_URL)).await {
                     Ok((ws, _)) => {
                         let (mut new_write, new_read) = ws.split();
                         let mut ok = true;
@@ -406,7 +428,7 @@ pub async fn stream_trades_batch(
         return Ok(Box::pin(futures::stream::empty()));
     }
 
-    let (ws_stream, _) = connect_async(WS_URL)
+    let (ws_stream, _) = connect_timeout(connect_async(WS_URL))
         .await
         .map_err(|e| GatewayError::WebSocket {
             exchange: EXCHANGE,
@@ -435,14 +457,17 @@ pub async fn stream_trades_batch(
         let mut write = write;
         let mut read = read;
         let mut backoff = Duration::from_secs(1);
+        let mut idle = ReadIdle::new(WS_READ_IDLE_TIMEOUT);
 
         'outer: loop {
             let _ = write.send(Message::text(make_ping())).await;
             let mut ping_interval = tokio::time::interval(Duration::from_secs(20));
             ping_interval.tick().await;
+            idle.touch();
 
             loop {
                 tokio::select! {
+                    biased;
                     // Потребитель бросил стрим — закрываем соединение сразу.
                     _ = tx.closed() => break 'outer,
                     _ = ping_interval.tick() => {
@@ -451,6 +476,7 @@ pub async fn stream_trades_batch(
                         }
                     }
                     msg = read.next() => {
+                        idle.touch();
                         match msg {
                             Some(Ok(Message::Text(text))) => {
                                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -475,6 +501,13 @@ pub async fn stream_trades_batch(
                             _ => {}
                         }
                     }
+                    _ = idle.expired() => {
+                        warn!(
+                            idle_secs = idle.timeout().as_secs(),
+                            "Gate WS: no frames, connection presumed dead — reconnecting"
+                        );
+                        break;
+                    }
                 }
             }
 
@@ -485,7 +518,7 @@ pub async fn stream_trades_batch(
                 }
                 warn!("Gate WS trades batch reconnecting in {backoff:?}…");
                 tokio::time::sleep(backoff).await;
-                match connect_async(WS_URL).await {
+                match connect_timeout(connect_async(WS_URL)).await {
                     Ok((ws, _)) => {
                         let (mut new_write, new_read) = ws.split();
                         let mut ok = true;

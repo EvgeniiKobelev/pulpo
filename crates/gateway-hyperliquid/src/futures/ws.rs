@@ -37,7 +37,7 @@ async fn subscribe_stream(
 ) -> Result<BoxStream<serde_json::Value>> {
     // Just verify we can connect — the background task handles everything.
     let (ws_stream, _) =
-        connect_async(WS_URL)
+        connect_timeout(connect_async(WS_URL))
             .await
             .map_err(|e| GatewayError::WebSocket {
                 exchange: ExchangeId::Hyperliquid,
@@ -65,6 +65,7 @@ async fn run_ws_loop(
     let mut backoff = Duration::from_secs(5);
     let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
     ping_interval.tick().await;
+    let mut idle = ReadIdle::new(WS_READ_IDLE_TIMEOUT);
 
     // Track how many subscribe messages we still need to send.
     let mut sub_idx: usize = 0;
@@ -74,10 +75,32 @@ async fn run_ws_loop(
     'outer: loop {
         loop {
             tokio::select! {
+                biased;
                 // Потребитель бросил стрим — закрываем соединение сразу.
                 _ = tx.closed() => break 'outer,
+                // ---- send next subscribe message (interleaved with reads) ----
+                _ = sub_delay.tick(), if sub_idx < subscriptions.len() => {
+                    let msg = serde_json::json!({
+                        "method": "subscribe",
+                        "subscription": subscriptions[sub_idx]
+                    });
+                    if write.send(Message::text(msg.to_string())).await.is_err() {
+                        warn!("Hyperliquid WS subscribe send failed at index {}", sub_idx);
+                        break;
+                    }
+                    sub_idx += 1;
+                }
+                // ---- periodic ping ----
+                _ = ping_interval.tick() => {
+                    let ping = serde_json::json!({"method": "ping"});
+                    if write.send(Message::text(ping.to_string())).await.is_err() {
+                        warn!("Hyperliquid WS ping send failed");
+                        break;
+                    }
+                }
                 // ---- read data ----
                 msg = read.next() => {
+                    idle.touch();
                     match msg {
                         Some(Ok(Message::Text(text))) => {
                             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -112,25 +135,12 @@ async fn run_ws_loop(
                         _ => {}
                     }
                 }
-                // ---- send next subscribe message (interleaved with reads) ----
-                _ = sub_delay.tick(), if sub_idx < subscriptions.len() => {
-                    let msg = serde_json::json!({
-                        "method": "subscribe",
-                        "subscription": subscriptions[sub_idx]
-                    });
-                    if write.send(Message::text(msg.to_string())).await.is_err() {
-                        warn!("Hyperliquid WS subscribe send failed at index {}", sub_idx);
-                        break;
-                    }
-                    sub_idx += 1;
-                }
-                // ---- periodic ping ----
-                _ = ping_interval.tick() => {
-                    let ping = serde_json::json!({"method": "ping"});
-                    if write.send(Message::text(ping.to_string())).await.is_err() {
-                        warn!("Hyperliquid WS ping send failed");
-                        break;
-                    }
+                _ = idle.expired() => {
+                    warn!(
+                        idle_secs = idle.timeout().as_secs(),
+                        "Hyperliquid WS: no frames, connection presumed dead — reconnecting"
+                    );
+                    break;
                 }
             }
         }
@@ -142,7 +152,7 @@ async fn run_ws_loop(
             }
             warn!("Hyperliquid WS reconnecting in {backoff:?}…");
             tokio::time::sleep(backoff).await;
-            match connect_async(WS_URL).await {
+            match connect_timeout(connect_async(WS_URL)).await {
                 Ok((ws, _)) => {
                     let (new_write, new_read) = ws.split();
                     write = new_write;
@@ -153,6 +163,7 @@ async fn run_ws_loop(
                     sub_delay.tick().await;
                     backoff = Duration::from_secs(5);
                     ping_interval.reset();
+                    idle.touch();
                     info!("Hyperliquid WS reconnected, re-subscribing to {} channels", subscriptions.len());
                     break;
                 }

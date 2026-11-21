@@ -29,7 +29,7 @@ async fn subscribe_and_stream(
     let url = url.to_string();
 
     let (ws_stream, _) =
-        connect_async(&url)
+        connect_timeout(connect_async(&url))
             .await
             .map_err(|e| GatewayError::WebSocket {
                 exchange: ExchangeId::AsterdexFutures,
@@ -61,13 +61,22 @@ async fn subscribe_and_stream(
         let mut backoff = Duration::from_secs(1);
         let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
         ping_interval.tick().await; // skip first immediate tick
+        let mut idle = ReadIdle::new(WS_READ_IDLE_TIMEOUT);
 
         'outer: loop {
             loop {
                 tokio::select! {
+                    biased;
                     // Потребитель бросил стрим — закрываем соединение сразу.
                     _ = tx.closed() => break 'outer,
+                    _ = ping_interval.tick() => {
+                        if write.send(Message::Ping(vec![].into())).await.is_err() {
+                            warn!("Asterdex Futures WS ping send failed");
+                            break;
+                        }
+                    }
                     msg = read.next() => {
+                        idle.touch();
                         match msg {
                             Some(Ok(Message::Text(text))) => {
                                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -100,11 +109,12 @@ async fn subscribe_and_stream(
                             _ => {}
                         }
                     }
-                    _ = ping_interval.tick() => {
-                        if write.send(Message::Ping(vec![].into())).await.is_err() {
-                            warn!("Asterdex Futures WS ping send failed");
-                            break;
-                        }
+                    _ = idle.expired() => {
+                        warn!(
+                            idle_secs = idle.timeout().as_secs(),
+                            "Asterdex Futures WS: no frames, connection presumed dead — reconnecting"
+                        );
+                        break;
                     }
                 }
             }
@@ -116,7 +126,7 @@ async fn subscribe_and_stream(
                 }
                 warn!("Asterdex Futures WS reconnecting in {backoff:?}…");
                 tokio::time::sleep(backoff).await;
-                match connect_async(&url).await {
+                match connect_timeout(connect_async(&url)).await {
                     Ok((ws, _)) => {
                         let (mut new_write, new_read) = ws.split();
                         if !streams.is_empty() {
@@ -139,6 +149,7 @@ async fn subscribe_and_stream(
                         read = new_read;
                         backoff = Duration::from_secs(1);
                         ping_interval.reset();
+                        idle.touch();
                         info!("Asterdex Futures WS reconnected");
                         break;
                     }
