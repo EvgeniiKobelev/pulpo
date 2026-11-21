@@ -58,6 +58,31 @@ pub async fn recv_while_open<T, U>(
 /// соединении кадр приходит минимум дважды за это окно.
 pub const WS_READ_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Сколько ждать TCP + TLS + WS-upgrade при (пере)подключении.
+///
+/// Без таймаута застрявший handshake (SYN без ответа, TLS посреди обрыва)
+/// держит цикл в `connect_async` вечно: ни реконнекта, ни backoff, книга
+/// замёрзла. С таймаутом это обычная ошибка подключения.
+pub const WS_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Подключение с [`WS_CONNECT_TIMEOUT`]: по таймауту — ошибка
+/// `io::ErrorKind::TimedOut` того же типа, что у самого подключения
+/// (у `tungstenite::Error` есть `From<io::Error>`), так что существующие
+/// ветки ошибок и backoff обрабатывают его без изменений.
+pub async fn connect_timeout<F, T, E>(connect: F) -> std::result::Result<T, E>
+where
+    F: std::future::Future<Output = std::result::Result<T, E>>,
+    E: From<std::io::Error>,
+{
+    match tokio::time::timeout(WS_CONNECT_TIMEOUT, connect).await {
+        Ok(result) => result,
+        Err(_) => Err(E::from(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "ws connect timed out",
+        ))),
+    }
+}
+
 /// Дедлайн тишины чтения WS-соединения.
 ///
 /// Любой принятый кадр сдвигает дедлайн ([`ReadIdle::touch`]); ветка
@@ -139,6 +164,17 @@ mod tests {
         // Ещё секунда тишины — дедлайн наступил.
         let late = tokio::time::timeout(std::time::Duration::from_secs(2), idle.expired()).await;
         assert!(late.is_ok(), "дедлайн не сработал после таймаута тишины");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connect_timeout_turns_stalled_handshake_into_error() {
+        let stalled = std::future::pending::<std::result::Result<(), std::io::Error>>();
+        let err = connect_timeout(stalled)
+            .await
+            .expect_err("застрявший handshake не превратился в ошибку");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        let ready = connect_timeout(async { Ok::<u8, std::io::Error>(7) }).await;
+        assert_eq!(ready.unwrap(), 7);
     }
 
     #[tokio::test]
