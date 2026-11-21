@@ -35,7 +35,7 @@ async fn subscribe_stream(
     topics: Vec<String>,
 ) -> Result<BoxStream<serde_json::Value>> {
     let (ws_stream, _) =
-        connect_async(WS_URL)
+        connect_timeout(connect_async(WS_URL))
             .await
             .map_err(|e| GatewayError::WebSocket {
                 exchange: ExchangeId::XtFutures,
@@ -64,6 +64,7 @@ async fn run_ws_loop(
     // Send ping every 25 seconds to keep connection alive (XT requires every 30s)
     let mut ping_interval = tokio::time::interval(Duration::from_secs(25));
     ping_interval.tick().await;
+    let mut idle = ReadIdle::new(WS_READ_IDLE_TIMEOUT);
 
     let mut sub_idx: usize = 0;
     let mut sub_delay = tokio::time::interval(SUB_DELAY);
@@ -72,10 +73,32 @@ async fn run_ws_loop(
     'outer: loop {
         loop {
             tokio::select! {
+                biased;
                 // Потребитель бросил стрим — закрываем соединение сразу.
                 _ = tx.closed() => break 'outer,
+                // ---- send next subscribe message (interleaved with reads) ----
+                _ = sub_delay.tick(), if sub_idx < topics.len() => {
+                    let sub_msg = serde_json::json!({
+                        "method": "SUBSCRIBE",
+                        "params": [&topics[sub_idx]],
+                        "id": format!("sub_{}", sub_idx)
+                    }).to_string();
+                    if write.send(Message::text(sub_msg)).await.is_err() {
+                        warn!("XT WS subscribe send failed at index {}", sub_idx);
+                        break;
+                    }
+                    sub_idx += 1;
+                }
+                // ---- periodic ping ----
+                _ = ping_interval.tick() => {
+                    if write.send(Message::text("ping")).await.is_err() {
+                        warn!("XT WS ping send failed");
+                        break;
+                    }
+                }
                 // ---- read data ----
                 msg = read.next() => {
+                    idle.touch();
                     match msg {
                         Some(Ok(Message::Text(text))) => {
                             // Handle XT pong response (plain text "pong")
@@ -119,25 +142,12 @@ async fn run_ws_loop(
                         _ => {}
                     }
                 }
-                // ---- send next subscribe message (interleaved with reads) ----
-                _ = sub_delay.tick(), if sub_idx < topics.len() => {
-                    let sub_msg = serde_json::json!({
-                        "method": "SUBSCRIBE",
-                        "params": [&topics[sub_idx]],
-                        "id": format!("sub_{}", sub_idx)
-                    }).to_string();
-                    if write.send(Message::text(sub_msg)).await.is_err() {
-                        warn!("XT WS subscribe send failed at index {}", sub_idx);
-                        break;
-                    }
-                    sub_idx += 1;
-                }
-                // ---- periodic ping ----
-                _ = ping_interval.tick() => {
-                    if write.send(Message::text("ping")).await.is_err() {
-                        warn!("XT WS ping send failed");
-                        break;
-                    }
+                _ = idle.expired() => {
+                    warn!(
+                        idle_secs = idle.timeout().as_secs(),
+                        "XT WS: no frames, connection presumed dead — reconnecting"
+                    );
+                    break;
                 }
             }
         }
@@ -149,7 +159,7 @@ async fn run_ws_loop(
             }
             warn!("XT WS reconnecting in {backoff:?}...");
             tokio::time::sleep(backoff).await;
-            match connect_async(WS_URL).await {
+            match connect_timeout(connect_async(WS_URL)).await {
                 Ok((ws, _)) => {
                     let (new_write, new_read) = ws.split();
                     write = new_write;
@@ -159,6 +169,7 @@ async fn run_ws_loop(
                     sub_delay.tick().await;
                     backoff = Duration::from_secs(1);
                     ping_interval.reset();
+                    idle.touch();
                     info!(
                         "XT WS reconnected, re-subscribing to {} channels",
                         topics.len()
