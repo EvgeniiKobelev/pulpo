@@ -52,15 +52,24 @@ async fn subscribe_and_stream(
     url: &str,
     streams: Vec<String>,
 ) -> Result<BoxStream<serde_json::Value>> {
+    subscribe_and_stream_with(url, streams, WS_READ_IDLE_TIMEOUT).await
+}
+
+/// [`subscribe_and_stream`] с явным дедлайном тишины чтения (тесты задают
+/// короткий).
+async fn subscribe_and_stream_with(
+    url: &str,
+    streams: Vec<String>,
+    idle_timeout: Duration,
+) -> Result<BoxStream<serde_json::Value>> {
     let url = url.to_string();
 
-    let (ws_stream, _) =
-        connect_async(&url)
-            .await
-            .map_err(|e| GatewayError::WebSocket {
-                exchange: ExchangeId::BinanceFutures,
-                message: e.to_string(),
-            })?;
+    let (ws_stream, _) = connect_async(&url)
+        .await
+        .map_err(|e| GatewayError::WebSocket {
+            exchange: ExchangeId::BinanceFutures,
+            message: e.to_string(),
+        })?;
 
     let (mut write, read) = ws_stream.split();
 
@@ -92,14 +101,25 @@ async fn subscribe_and_stream(
         let mut dropped: u64 = 0;
         let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
         ping_interval.tick().await; // skip first immediate tick
+        let mut idle = ReadIdle::new(idle_timeout);
 
         'outer: loop {
             // ---- message read loop with periodic ping ----
             loop {
+                // biased: ping раньше чтения — поток данных его не вытеснит;
+                // дедлайн тишины последним — при готовом кадре он не выигрывает.
                 tokio::select! {
+                    biased;
                     // Потребитель бросил стрим — закрываем соединение сразу.
                     _ = tx.closed() => break 'outer,
+                    _ = ping_interval.tick() => {
+                        if write.send(Message::Ping(vec![].into())).await.is_err() {
+                            warn!("Binance Futures WS ping send failed");
+                            break;
+                        }
+                    }
                     msg = read.next() => {
+                        idle.touch();
                         match msg {
                             Some(Ok(Message::Text(text))) => {
                                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -151,11 +171,13 @@ async fn subscribe_and_stream(
                             _ => {}
                         }
                     }
-                    _ = ping_interval.tick() => {
-                        if write.send(Message::Ping(vec![].into())).await.is_err() {
-                            warn!("Binance Futures WS ping send failed");
-                            break;
-                        }
+                    _ = idle.expired() => {
+                        warn!(
+                            streams = streams.len(),
+                            idle_secs = idle.timeout().as_secs(),
+                            "Binance Futures WS: no frames, connection presumed dead — reconnecting"
+                        );
+                        break;
                     }
                 }
             }
@@ -190,6 +212,7 @@ async fn subscribe_and_stream(
                         read = new_read;
                         backoff = Duration::from_secs(1);
                         ping_interval.reset();
+                        idle.touch();
                         info!("Binance Futures WS reconnected");
                         break;
                     }
@@ -225,10 +248,7 @@ pub async fn stream_orderbook(
 }
 
 /// Stream real-time trades for a single symbol.
-pub async fn stream_trades(
-    _config: &ExchangeConfig,
-    symbol: &Symbol,
-) -> Result<BoxStream<Trade>> {
+pub async fn stream_trades(_config: &ExchangeConfig, symbol: &Symbol) -> Result<BoxStream<Trade>> {
     let stream_name = format!("{}@trade", unified_to_binance(symbol).to_lowercase());
     let raw = subscribe_and_stream(WS_URL, vec![stream_name]).await?;
 
@@ -262,10 +282,7 @@ pub async fn stream_mark_price(
     _config: &ExchangeConfig,
     symbol: &Symbol,
 ) -> Result<BoxStream<MarkPrice>> {
-    let stream_name = format!(
-        "{}@markPrice@1s",
-        unified_to_binance(symbol).to_lowercase()
-    );
+    let stream_name = format!("{}@markPrice@1s", unified_to_binance(symbol).to_lowercase());
     let raw = subscribe_and_stream(WS_URL, vec![stream_name]).await?;
 
     Ok(Box::pin(raw.filter_map(|json| async move {
@@ -279,10 +296,7 @@ pub async fn stream_liquidations(
     _config: &ExchangeConfig,
     symbol: &Symbol,
 ) -> Result<BoxStream<Liquidation>> {
-    let stream_name = format!(
-        "{}@forceOrder",
-        unified_to_binance(symbol).to_lowercase()
-    );
+    let stream_name = format!("{}@forceOrder", unified_to_binance(symbol).to_lowercase());
     let raw = subscribe_and_stream(WS_URL, vec![stream_name]).await?;
 
     Ok(Box::pin(raw.filter_map(|json| async move {
@@ -415,16 +429,16 @@ async fn handle_ws_event(
     snap_tx: &mpsc::Sender<SnapshotMsg>,
 ) -> std::result::Result<(), &'static str> {
     let depth_json = json.get("data").unwrap_or(json);
-    let raw: BinanceFuturesWsDepthRaw = serde_json::from_value(depth_json.clone())
-        .map_err(|_| "parse depth")?;
+    let raw: BinanceFuturesWsDepthRaw =
+        serde_json::from_value(depth_json.clone()).map_err(|_| "parse depth")?;
 
     let symbol = binance_symbol_to_unified(&raw.symbol);
-    let bids: Vec<(Decimal, Decimal)> =
-        raw.bids.iter().filter_map(|p| parse_level(p)).collect();
-    let asks: Vec<(Decimal, Decimal)> =
-        raw.asks.iter().filter_map(|p| parse_level(p)).collect();
+    let bids: Vec<(Decimal, Decimal)> = raw.bids.iter().filter_map(|p| parse_level(p)).collect();
+    let asks: Vec<(Decimal, Decimal)> = raw.asks.iter().filter_map(|p| parse_level(p)).collect();
 
-    let state = states.entry(symbol.clone()).or_insert_with(SymbolState::new);
+    let state = states
+        .entry(symbol.clone())
+        .or_insert_with(SymbolState::new);
 
     if !state.book.ready {
         if state.buffer.len() < MAX_BUFFER {
@@ -610,7 +624,11 @@ async fn handle_snapshot(
     state.resync_count = 0;
     state.failed_bootstraps = 0;
 
-    let ts = if last_event_time > 0 { last_event_time } else { 0 };
+    let ts = if last_event_time > 0 {
+        last_event_time
+    } else {
+        0
+    };
     let ob = if prev_book.last_update_id > 0 {
         let (bids, asks) = state.book.diff_against_prev(&prev_book, TOP_LEVELS);
         OrderBook {
@@ -908,5 +926,50 @@ mod resync_tests {
             "purge must emit qty=0 to delete the stale wall downstream"
         );
         assert_eq!(states[&ston()].failed_bootstraps, PURGE_AFTER_FAILURES);
+    }
+}
+
+#[cfg(test)]
+mod idle_tests {
+    //! Полуоткрытое соединение: сервер принял, отдал кадр и замолчал, не
+    //! читая сокет (как при пропавшей сети — ни FIN, ни RST, ни pong).
+    use super::*;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn silent_connection_reconnects_after_idle_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (reconnected_tx, reconnected_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            ws.send(Message::text(r#"{"e":"depthUpdate"}"#))
+                .await
+                .unwrap();
+            // Держим сокет, но больше его не опрашиваем: ни кадров, ни pong.
+            let _silent = ws;
+            let (tcp2, _) = listener.accept().await.unwrap();
+            let _ws2 = tokio_tungstenite::accept_async(tcp2).await.unwrap();
+            let _ = reconnected_tx.send(());
+            std::future::pending::<()>().await;
+        });
+
+        let mut stream = subscribe_and_stream_with(
+            &format!("ws://{addr}"),
+            Vec::new(),
+            Duration::from_millis(300),
+        )
+        .await
+        .unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("первый кадр не пришёл");
+        assert!(first.is_some());
+        // Дедлайн 300 мс + backoff реконнекта 1 с — с запасом укладываемся в 5 с.
+        tokio::time::timeout(Duration::from_secs(5), reconnected_rx)
+            .await
+            .expect("молчащее соединение не переподключено")
+            .unwrap();
     }
 }
