@@ -64,12 +64,13 @@ async fn subscribe_and_stream_with(
 ) -> Result<BoxStream<serde_json::Value>> {
     let url = url.to_string();
 
-    let (ws_stream, _) = connect_async(&url)
-        .await
-        .map_err(|e| GatewayError::WebSocket {
-            exchange: ExchangeId::BinanceFutures,
-            message: e.to_string(),
-        })?;
+    let (ws_stream, _) =
+        connect_async(&url)
+            .await
+            .map_err(|e| GatewayError::WebSocket {
+                exchange: ExchangeId::BinanceFutures,
+                message: e.to_string(),
+            })?;
 
     let (mut write, read) = ws_stream.split();
 
@@ -248,7 +249,10 @@ pub async fn stream_orderbook(
 }
 
 /// Stream real-time trades for a single symbol.
-pub async fn stream_trades(_config: &ExchangeConfig, symbol: &Symbol) -> Result<BoxStream<Trade>> {
+pub async fn stream_trades(
+    _config: &ExchangeConfig,
+    symbol: &Symbol,
+) -> Result<BoxStream<Trade>> {
     let stream_name = format!("{}@trade", unified_to_binance(symbol).to_lowercase());
     let raw = subscribe_and_stream(WS_URL, vec![stream_name]).await?;
 
@@ -282,7 +286,10 @@ pub async fn stream_mark_price(
     _config: &ExchangeConfig,
     symbol: &Symbol,
 ) -> Result<BoxStream<MarkPrice>> {
-    let stream_name = format!("{}@markPrice@1s", unified_to_binance(symbol).to_lowercase());
+    let stream_name = format!(
+        "{}@markPrice@1s",
+        unified_to_binance(symbol).to_lowercase()
+    );
     let raw = subscribe_and_stream(WS_URL, vec![stream_name]).await?;
 
     Ok(Box::pin(raw.filter_map(|json| async move {
@@ -296,7 +303,10 @@ pub async fn stream_liquidations(
     _config: &ExchangeConfig,
     symbol: &Symbol,
 ) -> Result<BoxStream<Liquidation>> {
-    let stream_name = format!("{}@forceOrder", unified_to_binance(symbol).to_lowercase());
+    let stream_name = format!(
+        "{}@forceOrder",
+        unified_to_binance(symbol).to_lowercase()
+    );
     let raw = subscribe_and_stream(WS_URL, vec![stream_name]).await?;
 
     Ok(Box::pin(raw.filter_map(|json| async move {
@@ -429,16 +439,16 @@ async fn handle_ws_event(
     snap_tx: &mpsc::Sender<SnapshotMsg>,
 ) -> std::result::Result<(), &'static str> {
     let depth_json = json.get("data").unwrap_or(json);
-    let raw: BinanceFuturesWsDepthRaw =
-        serde_json::from_value(depth_json.clone()).map_err(|_| "parse depth")?;
+    let raw: BinanceFuturesWsDepthRaw = serde_json::from_value(depth_json.clone())
+        .map_err(|_| "parse depth")?;
 
     let symbol = binance_symbol_to_unified(&raw.symbol);
-    let bids: Vec<(Decimal, Decimal)> = raw.bids.iter().filter_map(|p| parse_level(p)).collect();
-    let asks: Vec<(Decimal, Decimal)> = raw.asks.iter().filter_map(|p| parse_level(p)).collect();
+    let bids: Vec<(Decimal, Decimal)> =
+        raw.bids.iter().filter_map(|p| parse_level(p)).collect();
+    let asks: Vec<(Decimal, Decimal)> =
+        raw.asks.iter().filter_map(|p| parse_level(p)).collect();
 
-    let state = states
-        .entry(symbol.clone())
-        .or_insert_with(SymbolState::new);
+    let state = states.entry(symbol.clone()).or_insert_with(SymbolState::new);
 
     if !state.book.ready {
         if state.buffer.len() < MAX_BUFFER {
@@ -624,11 +634,7 @@ async fn handle_snapshot(
     state.resync_count = 0;
     state.failed_bootstraps = 0;
 
-    let ts = if last_event_time > 0 {
-        last_event_time
-    } else {
-        0
-    };
+    let ts = if last_event_time > 0 { last_event_time } else { 0 };
     let ob = if prev_book.last_update_id > 0 {
         let (bids, asks) = state.book.diff_against_prev(&prev_book, TOP_LEVELS);
         OrderBook {
